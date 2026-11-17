@@ -88,8 +88,10 @@ export default {
       harvester:          {
         loading: false, namespaces: [], images: [], networks: [], keyPairs: []
       },
-      harvesterError: '',
-      errors:         [],
+      harvesterError:    '',
+      // Until the user edits a worker size, a new worker pool takes the control plane sizes
+      workerSizesEdited: false,
+      errors:            [],
     };
   },
 
@@ -216,6 +218,17 @@ export default {
       this.form.image = neu?.image || '';
       this.form.releaseManifest = neu?.releaseManifest || '';
       this.form.kubernetesVersion = neu?.kubernetesVersion || '';
+    },
+
+    // Same as adding a second pool in Rancher's Harvester form: it starts as a copy of the first one
+    'form.workers.count'(neu, old) {
+      if (!old && neu > 0 && !this.workerSizesEdited) {
+        const { cpu, memory, disk } = this.form.controlPlane;
+
+        Object.assign(this.form.workers, {
+          cpu, memory, disk
+        });
+      }
     },
 
     'form.vmNamespace'() {
@@ -384,6 +397,12 @@ export default {
 
       btnCb(true);
       this.$router.push(this.doneRoute);
+    },
+
+    sizeEdited(pool) {
+      if (pool === 'workers' && this.form.workers.count > 0) {
+        this.workerSizesEdited = true;
+      }
     },
 
     cancel() {
@@ -588,6 +607,7 @@ export default {
               :required="true"
               :label="t('elemental3.fields.cpu')"
               :data-testid="`elemental3-${ pool }-cpu`"
+              @update:value="sizeEdited(pool)"
             />
           </div>
           <div class="col span-3">
@@ -599,6 +619,7 @@ export default {
               :required="true"
               :label="t('elemental3.fields.memory')"
               :data-testid="`elemental3-${ pool }-memory`"
+              @update:value="sizeEdited(pool)"
             />
           </div>
           <div class="col span-3">
@@ -610,6 +631,7 @@ export default {
               :required="true"
               :label="t('elemental3.fields.disk')"
               :data-testid="`elemental3-${ pool }-disk`"
+              @update:value="sizeEdited(pool)"
             />
           </div>
         </div>
