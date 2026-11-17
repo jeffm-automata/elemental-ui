@@ -1,0 +1,62 @@
+elemental3:
+  provisioner:
+    label: Elemental 3
+    description: RKE2 cluster of Elemental 3 nodes on Harvester, through Cluster API
+    tag: Experimental
+  title: 'Create an Elemental 3 cluster on Harvester'
+  arch: 'Node images are x86-64 only.'
+  sections:
+    cluster: Cluster
+    release: Elemental release
+    harvester: Harvester
+    controlPlane: Control plane machines
+    workers: Worker machines
+  fields:
+    harvesterCluster: Harvester Cluster
+    name: Cluster Name
+    namespace: Namespace
+    namespaceTooltip: Namespace on the Rancher management cluster that holds the Cluster API objects.
+    release: Elemental Release
+    releasePlaceholder: Select a release
+    kubernetesVersion: Kubernetes Version
+    kubernetesVersionTooltip: 'The RKE2 version this image contains, for example v1.37.2+rke2r1. Only asked when the image was not delivered by the image build operator.'
+    vmNamespace: VM Namespace
+    network: Network Name
+    sshKeyPair: SSH Key Pair
+    sshKeyPairTooltip: 'The Harvester provider for Cluster API requires a key pair for every machine.'
+    controlPlaneHost: Control Plane Address
+    controlPlaneHostTooltip: 'A free IPv4 address on the VM network. kube-vip announces it from the control plane machines.'
+    count: Machine Count
+    cpu: CPUs
+    memory: Memory
+    disk: Disk
+  releaseOption:
+    nodeImage: '{release} ({version})'
+    image: '{name} (image, no release information)'
+  prerequisites:
+    title: 'Creating this cluster will probably be refused:'
+    missing: '{what} is not installed on the management cluster, or you are not allowed to create {kind} objects.'
+    capi: Cluster API (Rancher Turtles)
+    caprke2: The RKE2 provider for Cluster API
+    caphv: The Harvester provider for Cluster API
+    noHarvester: 'No Harvester cluster is imported in Virtualization Management, or you have no access to one.'
+    noOperator: 'The Elemental image build operator is not installed, so no releases are listed. Select an Elemental 3 node image that is already in Harvester and enter its Kubernetes version.'
+    harvesterError: 'Could not read from Harvester cluster {cluster}: {error}'
+  validation:
+    required: '{field} is required.'
+    name: 'Cluster Name must be lowercase letters, digits and "-", start with a letter, and be at most {max} characters.'
+    kubernetesVersion: 'Kubernetes Version must look like v1.37.2+rke2r1.'
+    controlPlaneHost: 'Control Plane Address must be an IPv4 address.'
+    reference: '{field} must be a namespace/name reference.'
+    controlPlaneCount: 'The control plane needs at least one machine.'
+    workerCount: 'Worker Machine Count must be zero or more.'
+    size: '{field} must be a whole number of at least 1.'
+  save:
+    denied: 'Cannot create {kind} "{name}" in namespace {namespace}: {error}'
+    kubeconfig: 'Could not create a kubeconfig for the Harvester cluster: {error}'
+    failed: 'Creating {kind} "{name}" failed: {error}'
+    rolledBack: 'The objects created before the failure were deleted again.'
+    rollbackFailed: 'Could not delete {kind} "{name}" again: {error}'
+cluster:
+  provider:
+    elemental3-harvester: Elemental 3 on Harvester
