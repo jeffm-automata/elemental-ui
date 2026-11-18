@@ -790,7 +790,7 @@ export default {
               :class="stateColor(p.state)"
             >{{ t(`elemental3.progress.state.${ p.state }`) }}</span>
             <span class="e3-phase-title">{{ t(`elemental3.progress.phase.${ p.key }`) }}</span>
-            <span class="text-muted">{{ t(`elemental3.progress.detail.${ p.code }`, p.params) }}</span>
+            <span class="text-muted">{{ t(`elemental3.progress.detail.${ p.code }`, p.params, true) }}</span>
             <span
               v-if="p.message"
               class="e3-phase-message"
@@ -886,7 +886,7 @@ export default {
           v-if="releaseDenied"
           color="warning"
           data-testid="elemental3-release-denied"
-          :label="t('elemental3.rights.missing', { right: releaseDenied })"
+          :label="t('elemental3.rights.missing', { right: releaseDenied }, true)"
         />
         <Banner
           v-if="releaseError"
@@ -917,7 +917,7 @@ export default {
                 class="icon"
                 :class="checkIcon(c.passed)"
               />
-              {{ t(`elemental3.preflight.${ c.key }.${ c.passed === true ? 'ok' : (c.passed === false ? 'failed' : 'unknown') }`, c.params) }}
+              {{ t(`elemental3.preflight.${ c.key }.${ c.passed === true ? 'ok' : (c.passed === false ? 'failed' : 'unknown') }`, c.params, true) }}
             </li>
           </ul>
           <p class="text-muted e3-small mb-0">
