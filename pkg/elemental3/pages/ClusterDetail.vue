@@ -764,7 +764,7 @@ export default {
         data-testid="elemental3-detail-problem"
         :data-blocking="`${ p.blocking }`"
       >
-        <span><b>{{ p.kind }} {{ p.name }}</b> · {{ p.type }}<template v-if="p.reason"> ({{ p.reason }})</template>: {{ p.message }}<template v-if="!p.blocking"> — {{ t('elemental3.detail.notBlocking') }}</template></span>
+        <span><b>{{ p.kind }} {{ p.name }}</b> · {{ p.type }}<template v-if="p.reason"> ({{ p.reason }})</template>: {{ p.message }}<template v-if="p.stalledMinutes"> — {{ t('elemental3.detail.stalled', { minutes: p.stalledMinutes }) }}</template><template v-if="!p.blocking"> — {{ t('elemental3.detail.notBlocking') }}</template></span>
       </Banner>
       <Banner
         v-if="deniedList.length"

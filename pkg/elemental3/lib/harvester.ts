@@ -48,42 +48,34 @@ export function harvesterBase(clusterId: string): string {
 }
 
 /**
- * What the Harvester provider (CAPHV) does with its Harvester identity before it reports the
- * infrastructure as ready: it reads the Harvester deployment and creates a LoadBalancer in the VM
- * namespace, whose address then REPLACES spec.controlPlaneEndpoint of the HarvesterCluster.
- * The form asks Harvester whether the logged-in user may do both (SelfSubjectAccessReview) and
- * writes objects for the path CAPHV will actually take.
+ * The Harvester provider (CAPHV) creates the control plane's LoadBalancer in the VM namespace with its
+ * Harvester identity, which is a kubeconfig of the logged-in user, and removes it with the cluster. The
+ * form asks Harvester whether that user may do both (SelfSubjectAccessReview). No right outside the VM
+ * namespace is needed.
  */
 export function endpointAccessReviews(vmNamespace: string): { key: string; spec: any }[] {
-  return [
-    {
-      key:  'harvesterDeployment',
-      spec: {
-        resourceAttributes: {
-          group: 'apps', resource: 'deployments', verb: 'get', namespace: 'harvester-system', name: 'harvester'
-        }
-      },
+  return ['create', 'delete'].map((verb) => ({
+    key:  `loadBalancer-${ verb }`,
+    spec: {
+      resourceAttributes: {
+        group: 'loadbalancer.harvesterhci.io', resource: 'loadbalancers', verb, namespace: vmNamespace
+      }
     },
-    {
-      key:  'loadBalancer',
-      spec: {
-        resourceAttributes: {
-          group: 'loadbalancer.harvesterhci.io', resource: 'loadbalancers', verb: 'create', namespace: vmNamespace
-        }
-      },
-    },
-  ];
+  }));
 }
 
-export type EndpointMode = 'loadBalancer' | 'address';
+export type LoadBalancerRight = 'allowed' | 'denied' | 'unknown';
 
-/** allowed: one boolean per review of endpointAccessReviews, null when the review itself failed. */
-export function endpointModeFor(allowed: (boolean | null)[]): { mode: EndpointMode; certain: boolean } {
-  if (allowed.length && allowed.every((a) => a === true)) {
-    return { mode: 'loadBalancer', certain: true };
+/**
+ * allowed: one boolean per review of endpointAccessReviews, null when the review itself failed.
+ * `denied` only when Harvester said no; a review that could not be made leaves the default in place.
+ */
+export function loadBalancerRight(allowed: (boolean | null)[]): LoadBalancerRight {
+  if (allowed.some((a) => a === false)) {
+    return 'denied';
   }
 
-  return { mode: 'address', certain: allowed.length > 0 && allowed.every((a) => a !== null) };
+  return allowed.length > 0 && allowed.every((a) => a === true) ? 'allowed' : 'unknown';
 }
 
 function byLabel<T>(a: Option<T>, b: Option<T>): number {

@@ -1,5 +1,5 @@
 import {
-  IMAGE_KUBERNETES_ANNOTATION, IMAGE_RELEASE_ANNOTATION, endpointAccessReviews, endpointModeFor, errorText, imageOptions, keyPairOptions, namespaceOptions, networkOptions, nodeImageOptions, releaseName
+  IMAGE_KUBERNETES_ANNOTATION, IMAGE_RELEASE_ANNOTATION, endpointAccessReviews, errorText, imageOptions, keyPairOptions, loadBalancerRight, namespaceOptions, networkOptions, nodeImageOptions, releaseName
 } from '../harvester';
 
 const ready = { conditions: [{ type: 'Ready', status: 'True' }] };
@@ -102,29 +102,29 @@ describe('imageOptions', () => {
   });
 });
 
-describe('control plane endpoint mode', () => {
-  it('asks Harvester the two things the Harvester provider does before it reports ready', () => {
+describe('control plane load balancer right', () => {
+  it('asks Harvester what the Harvester provider needs: create and delete load balancers in the VM namespace, nothing outside it', () => {
     const reviews = endpointAccessReviews('tenant');
 
     expect(reviews.map((r) => r.spec.resourceAttributes)).toStrictEqual([
       {
-        group: 'apps', resource: 'deployments', verb: 'get', namespace: 'harvester-system', name: 'harvester'
+        group: 'loadbalancer.harvesterhci.io', resource: 'loadbalancers', verb: 'create', namespace: 'tenant'
       },
       {
-        group: 'loadbalancer.harvesterhci.io', resource: 'loadbalancers', verb: 'create', namespace: 'tenant'
+        group: 'loadbalancer.harvesterhci.io', resource: 'loadbalancers', verb: 'delete', namespace: 'tenant'
       },
     ]);
   });
 
-  it('uses the load balancer only when the user may do both', () => {
-    expect(endpointModeFor([true, true])).toStrictEqual({ mode: 'loadBalancer', certain: true });
-    expect(endpointModeFor([false, true])).toStrictEqual({ mode: 'address', certain: true });
-    expect(endpointModeFor([true, false])).toStrictEqual({ mode: 'address', certain: true });
+  it('is allowed only when the user may do both, and denied as soon as Harvester says no to one', () => {
+    expect(loadBalancerRight([true, true])).toBe('allowed');
+    expect(loadBalancerRight([true, false])).toBe('denied');
+    expect(loadBalancerRight([false, null])).toBe('denied');
   });
 
-  it('falls back to the address and says it is not certain when Harvester did not answer', () => {
-    expect(endpointModeFor([null, true])).toStrictEqual({ mode: 'address', certain: false });
-    expect(endpointModeFor([])).toStrictEqual({ mode: 'address', certain: false });
+  it('is unknown, not denied, when Harvester did not answer', () => {
+    expect(loadBalancerRight([null, true])).toBe('unknown');
+    expect(loadBalancerRight([])).toBe('unknown');
   });
 });
 

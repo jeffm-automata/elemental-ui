@@ -53,6 +53,11 @@ export interface Problem {
    * cluster whose infrastructure was marked ready) is still shown, as a warning.
    */
   blocking: boolean;
+  /**
+   * Whole minutes the condition has been in this state, when it is shown as an error only because it
+   * has not changed for too long (a boot that never finished). 0 for a refusal or a reported failure.
+   */
+  stalledMinutes: number;
 }
 
 export interface ConditionRow extends Condition {
@@ -114,21 +119,73 @@ const NEGATIVE_POLARITY = ['RollingOut', 'Remediating', 'ScalingDown', 'ScalingU
  * true", "container runtime network not ready: ... cni plugin not initialized" while a node boots).
  * Their message says so; such a condition is "not yet", not a failure.
  */
-const NOT_YET_RE = /^waiting\b|waiting for|not (yet )?established|not yet|in progress|not ready|not initialized/i;
+const NOT_YET_RE = /^waiting\b|waiting for|not (yet )?established|not yet|in progress|not ready|not initialized|still (creating|provisioning|booting|starting)|being (created|provisioned)|does not exist yet/i;
 
-/** True when a condition reports a failure, as opposed to "not yet". */
-export function isFailure(c: Condition): boolean {
-  if (!c || NEGATIVE_POLARITY.includes(c.type)) {
-    return false;
+/**
+ * Refusals: nothing gets better by waiting, so these are errors from the first second
+ * (a missing right, a rejected object, a controller that says it gave up).
+ */
+const TERMINAL_RE = /forbidden|denied|unauthori[sz]ed|invalid|unprocessable|quota|giving up|will not (be )?retr/i;
+
+/**
+ * A new machine reports "failed" probes and a not-ready node for minutes while it boots (no CNI yet,
+ * kubelet not registered, API not reachable). Such a condition is shown as in progress, and becomes an
+ * error only when it has not changed for this long.
+ */
+export const FAILURE_GRACE_SECONDS = 5 * 60;
+/** A condition that only says "not yet" becomes an error when it has not changed for this long. */
+export const NOT_YET_TIMEOUT_SECONDS = 30 * 60;
+
+export type Severity = 'ok' | 'progress' | 'error';
+
+function ageSeconds(c: Condition, now: number): number | null {
+  const t = Date.parse(c?.lastTransitionTime || '');
+
+  return Number.isFinite(t) ? Math.max(0, (now - t) / 1000) : null;
+}
+
+/**
+ * What a condition means for the user right now.
+ * `error`: a refusal (at once), a failure that has lasted longer than FAILURE_GRACE_SECONDS, or a
+ * "not yet" that has lasted longer than NOT_YET_TIMEOUT_SECONDS. A failure without a transition time
+ * is an error: its age is unknown.
+ * `progress`: not true yet, and nothing says it will not become true.
+ */
+export function severity(c: Condition, now: number = Date.now()): Severity {
+  if (!c || NEGATIVE_POLARITY.includes(c.type) || c.status === 'True') {
+    return 'ok';
   }
-  if (c.status === 'True') {
-    return false;
+  const reason = c.reason || '';
+  const message = c.message || '';
+  const age = ageSeconds(c, now);
+
+  if (TERMINAL_RE.test(reason) || TERMINAL_RE.test(message)) {
+    return 'error';
   }
-  if (NOT_YET_RE.test(c.message || '')) {
-    return false;
+  if (NOT_YET_RE.test(message)) {
+    return age !== null && age > NOT_YET_TIMEOUT_SECONDS ? 'error' : 'progress';
+  }
+  if (FAILURE_RE.test(reason) || FAILURE_RE.test(message)) {
+    return age === null || age > FAILURE_GRACE_SECONDS ? 'error' : 'progress';
   }
 
-  return FAILURE_RE.test(c.reason || '') || FAILURE_RE.test(c.message || '');
+  return 'progress';
+}
+
+/** Minutes without change of a condition that is an error only through its age; 0 otherwise. */
+export function stalledMinutes(c: Condition, now: number = Date.now()): number {
+  const age = ageSeconds(c, now);
+
+  if (age === null || severity(c, now) !== 'error' || TERMINAL_RE.test(c.reason || '') || TERMINAL_RE.test(c.message || '')) {
+    return 0;
+  }
+
+  return NOT_YET_RE.test(c.message || '') ? Math.floor(age / 60) : 0;
+}
+
+/** True when a condition reports a failure, as opposed to "not yet" or a failure too young to count. */
+export function isFailure(c: Condition, now: number = Date.now()): boolean {
+  return severity(c, now) === 'error';
 }
 
 function num(n: any): number {
@@ -161,7 +218,8 @@ export function workerTotals(o: ClusterObjects): { desired: number; ready: numbe
  * The phases a new cluster goes through, in order. The first phase that is not done is `active`
  * (or `error` when one of its objects reports a failure); the ones after it are `waiting`.
  */
-export function progressPhases(o: ClusterObjects): Phase[] {
+export function progressPhases(o: ClusterObjects, now: number = Date.now()): Phase[] {
+  const failing = (c: Condition) => isFailure(c, now);
   const out: Phase[] = [];
   const cluster = o.cluster;
   const cp = o.controlPlane;
@@ -174,7 +232,7 @@ export function progressPhases(o: ClusterObjects): Phase[] {
   // 1. Infrastructure (the Harvester provider's part)
   const infraDone = isTrue(cluster, 'InfrastructureReady') || cluster?.status?.initialization?.infrastructureProvisioned === true;
   const infraPending = firstPending(infra, ['HarvesterConnectionReady', 'LoadBalancerReady', 'InfrastructureReady']) || condition(cluster, 'InfrastructureReady');
-  const infraFailed = conditions(infra).some(isFailure);
+  const infraFailed = conditions(infra).some(failing);
   const endpoint = infra?.spec?.controlPlaneEndpoint?.host || cluster?.spec?.controlPlaneEndpoint?.host || '';
 
   out.push({
@@ -182,7 +240,7 @@ export function progressPhases(o: ClusterObjects): Phase[] {
     state:   infraDone ? 'done' : (infraFailed ? 'error' : 'active'),
     code:    infraDone ? 'infrastructureDone' : 'infrastructureWaiting',
     params:  { endpoint },
-    message: infraDone ? '' : text(conditions(infra).find(isFailure) || infraPending),
+    message: infraDone ? '' : text(conditions(infra).find(failing) || infraPending),
   });
 
   // 2. Control plane machines
@@ -190,20 +248,20 @@ export function progressPhases(o: ClusterObjects): Phase[] {
   const cpReady = num(cp?.status?.readyReplicas);
   const cpInitialized = isTrue(cluster, 'ControlPlaneInitialized') || cluster?.status?.initialization?.controlPlaneInitialized === true || cp?.status?.initialization?.controlPlaneInitialized === true;
   const cpDone = cpInitialized && cpDesired > 0 && cpReady >= cpDesired;
-  const cpFailed = conditions(cp).some(isFailure) || !!cp?.status?.failureMessage;
+  const cpFailed = conditions(cp).some(failing) || !!cp?.status?.failureMessage;
 
   out.push({
     key:     'controlPlane',
     state:   cpDone ? 'done' : (cpFailed ? 'error' : 'active'),
     code:    cpDone ? 'controlPlaneDone' : (cpInitialized ? 'controlPlaneScaling' : 'controlPlaneWaiting'),
     params:  { ready: cpReady, desired: cpDesired },
-    message: cpDone ? '' : (cp?.status?.failureMessage || text(conditions(cp).find(isFailure) || firstPending(cp, ['MachinesReady', 'Available', 'Ready']) || condition(cluster, 'ControlPlaneAvailable'))),
+    message: cpDone ? '' : (cp?.status?.failureMessage || text(conditions(cp).find(failing) || firstPending(cp, ['MachinesReady', 'Available', 'Ready']) || condition(cluster, 'ControlPlaneAvailable'))),
   });
 
   // 3. Worker machines
   const w = workerTotals(o);
   const mds = o.machineDeployments || [];
-  const wFailed = mds.some((md) => conditions(md).some(isFailure));
+  const wFailed = mds.some((md) => conditions(md).some(failing));
   const wDone = w.ready >= w.desired;
 
   out.push({
@@ -211,7 +269,7 @@ export function progressPhases(o: ClusterObjects): Phase[] {
     state:   w.desired === 0 ? 'skipped' : (wDone ? 'done' : (wFailed ? 'error' : 'active')),
     code:    w.desired === 0 ? 'workersNone' : (wDone ? 'workersDone' : 'workersWaiting'),
     params:  { ready: w.ready, desired: w.desired },
-    message: (w.desired === 0 || wDone) ? '' : text(mds.map((md) => conditions(md).find(isFailure) || firstPending(md, ['MachinesReady', 'Available'])).find((c) => !!c) || condition(cluster, 'WorkersAvailable')),
+    message: (w.desired === 0 || wDone) ? '' : text(mds.map((md) => conditions(md).find(failing) || firstPending(md, ['MachinesReady', 'Available'])).find((c) => !!c) || condition(cluster, 'WorkersAvailable')),
   });
 
   // 4. Import into Rancher (Rancher Turtles). The object is Rancher's; a user who is not a member cannot see it.
@@ -281,8 +339,8 @@ const PHASE_OF_KIND: Record<string, Phase['key']> = {
 };
 
 /** Conditions that report a failure, plus failure messages of machines. Shown as banners. */
-export function problems(o: ClusterObjects): Problem[] {
-  const phases = progressPhases(o);
+export function problems(o: ClusterObjects, now: number = Date.now()): Problem[] {
+  const phases = progressPhases(o, now);
   const unfinished = (key: Phase['key']) => !['done', 'skipped'].includes(phases.find((p) => p.key === key)?.state || '');
   const provisioned = isProvisioned(phases);
   const machinePhase = (name: string) => (o.machines || []).find((m) => m.metadata?.name === name)?.status?.phase;
@@ -293,15 +351,15 @@ export function problems(o: ClusterObjects): Problem[] {
 
     return PHASE_OF_KIND[kind] ? unfinished(PHASE_OF_KIND[kind]) : !provisioned;
   };
-  const out: Problem[] = conditionRows(o).filter(isFailure).map((c) => ({
-    kind: c.kind, name: c.name, type: c.type, reason: c.reason || '', message: c.message || '', blocking: blocking(c.kind, c.name)
+  const out: Problem[] = conditionRows(o).filter((c) => isFailure(c, now)).map((c) => ({
+    kind: c.kind, name: c.name, type: c.type, reason: c.reason || '', message: c.message || '', blocking: blocking(c.kind, c.name), stalledMinutes: stalledMinutes(c, now)
   }));
   const failed = (kind: string, obj: any) => {
     const msg = obj?.status?.failureMessage;
 
     if (msg) {
       out.push({
-        kind, name: obj.metadata?.name || '', type: 'Failure', reason: obj.status?.failureReason || '', message: msg, blocking: true
+        kind, name: obj.metadata?.name || '', type: 'Failure', reason: obj.status?.failureReason || '', message: msg, blocking: true, stalledMinutes: 0
       });
     }
   };
@@ -352,11 +410,11 @@ export function poolRows(o: ClusterObjects): PoolRow[] {
 const CONTROL_PLANE_LABEL = 'cluster.x-k8s.io/control-plane';
 const DEPLOYMENT_LABEL = 'cluster.x-k8s.io/deployment-name';
 
-export function machineRows(machines: any[] | null | undefined): MachineRow[] {
+export function machineRows(machines: any[] | null | undefined, now: number = Date.now()): MachineRow[] {
   return (machines || []).map((m) => {
     const labels = m.metadata?.labels || {};
     const isCp = CONTROL_PLANE_LABEL in labels;
-    const pending = conditions(m).find(isFailure) || firstPending(m, ['Ready', 'InfrastructureReady', 'BootstrapConfigReady', 'NodeHealthy']);
+    const pending = conditions(m).find((c) => isFailure(c, now)) || firstPending(m, ['Ready', 'InfrastructureReady', 'BootstrapConfigReady', 'NodeHealthy']);
 
     return {
       name:    m.metadata?.name || '',
@@ -372,11 +430,11 @@ export function machineRows(machines: any[] | null | undefined): MachineRow[] {
 }
 
 /** One-word state of a cluster for the list page, from the phases. */
-export function clusterState(o: ClusterObjects): 'deleting' | 'error' | 'provisioning' | 'ready' {
+export function clusterState(o: ClusterObjects, now: number = Date.now()): 'deleting' | 'error' | 'provisioning' | 'ready' {
   if (o.cluster?.metadata?.deletionTimestamp) {
     return 'deleting';
   }
-  const phases = progressPhases(o);
+  const phases = progressPhases(o, now);
 
   if (phases.some((p) => p.state === 'error')) {
     return 'error';

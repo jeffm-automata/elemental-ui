@@ -4,8 +4,10 @@
  * This file has no imports on purpose: it is plain data in, plain objects out, so the same objects can be
  * written with kubectl and the unit tests run without the Rancher shell.
  *
- * The object set is the one proven in the lab for generic Elemental 3 node images
- * (CAPHV v0.10.1 + CAPRKE2 v0.25.3, Cluster API v1.13 contract v1beta2, imported into Rancher by Turtles):
+ * The object set is the one proven in the lab for generic Elemental 3 node images with a Harvester provider
+ * that creates the control plane load balancer with a namespace-scoped identity, sets the node addresses and
+ * knows `loadBalancerConfig.ipamType: external` (CAPHV v0.10.1 plus those three fixes; CAPRKE2 v0.25.3,
+ * Cluster API v1.13 contract v1beta2, imported into Rancher by Turtles):
  * Cluster, HarvesterCluster, RKE2ControlPlane, two HarvesterMachineTemplates, RKE2ConfigTemplate,
  * MachineDeployment and the identity Secret CAPHV reads the Harvester kubeconfig from.
  */
@@ -83,11 +85,13 @@ export interface WizardValues {
   sshKeyPair: string;
   /**
    * Who provides the control plane address.
-   * `address`: the address in controlPlaneHost, announced by kube-vip on the control plane machines.
-   * `loadBalancer`: a Harvester LoadBalancer that the Harvester provider creates; Harvester assigns the address.
+   * `loadBalancer` (default): a Harvester LoadBalancer that the Harvester provider creates; Harvester
+   * assigns the address (DHCP) and the provider writes it into the HarvesterCluster.
+   * `address` (advanced): the address in controlPlaneHost, announced by kube-vip on the control plane
+   * machines; the provider is told to leave the endpoint alone (`ipamType: external`).
    */
   endpointMode?: 'address' | 'loadBalancer';
-  /** Control plane address announced by kube-vip (endpointMode address) */
+  /** Control plane address announced by kube-vip (endpointMode address only) */
   controlPlaneHost: string;
   controlPlane: PoolValues;
   workers: PoolValues;
@@ -121,7 +125,7 @@ export function defaultValues(): WizardValues {
     releaseManifest:   '',
     network:           '',
     sshKeyPair:        '',
-    endpointMode:      'address',
+    endpointMode:      'loadBalancer',
     controlPlaneHost:  '',
     controlPlane:      { ...DEFAULT_POOL },
     workers:           { ...DEFAULT_POOL, count: 0 },
@@ -149,8 +153,9 @@ export function isIPv4(value: string): boolean {
   return parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255 && String(Number(p)) === p);
 }
 
+/** The load balancer is the default: only an explicit `address` selects kube-vip. */
 export function usesLoadBalancer(v: WizardValues): boolean {
-  return v.endpointMode === 'loadBalancer';
+  return v.endpointMode !== 'address';
 }
 
 /** RKE2's registration port: joining machines reach the first server through it */
@@ -212,29 +217,9 @@ export function validate(v: WizardValues): { field: string; code: string; params
 }
 
 /**
- * Publishes the node's address in its Node object. With `cloud-provider-name: external` the kubelet leaves
- * status.addresses to a cloud controller manager, and no Harvester cloud provider runs in the cluster
- * (the tenant's Harvester identity cannot create the credentials it needs).
+ * kube-vip manifest RKE2 deploys from its manifests directory: announces the control plane address.
+ * Only written in `address` mode; with the Harvester load balancer there is no kube-vip.
  */
-export const NODE_ADDRESS_SCRIPT = `#!/bin/sh
-# Elemental 3: publish this node's address in its Node object (no cloud controller manager does it).
-A=/var/lib/rancher/rke2/agent
-N="$(cat /etc/hostname)"
-for i in $(seq 1 60); do
-  IP="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \\([0-9.]*\\).*/\\1/p')"
-  S="$(sed -n 's/^ *server: *//p' $A/kubelet.kubeconfig 2>/dev/null | head -1)"
-  if [ -n "$IP" ] && [ -n "$S" ] && curl -sf -o /dev/null -X PATCH \\
-       --cacert $A/server-ca.crt --cert $A/client-kubelet.crt --key $A/client-kubelet.key \\
-       -H 'Content-Type: application/merge-patch+json' "$S/api/v1/nodes/$N/status" \\
-       -d "{\\"status\\":{\\"addresses\\":[{\\"type\\":\\"InternalIP\\",\\"address\\":\\"$IP\\"},{\\"type\\":\\"Hostname\\",\\"address\\":\\"$N\\"}]}}"; then
-    echo "node $N address set to $IP"; exit 0
-  fi
-  sleep 5
-done
-echo "could not set the address of node $N" >&2; exit 1
-`;
-
-/** kube-vip manifest RKE2 deploys from its manifests directory: announces the control plane address. */
 export function kubeVipManifest(address: string): string {
   return `apiVersion: v1
 kind: ServiceAccount
@@ -352,10 +337,6 @@ function machineTemplate(name: string, v: WizardValues, pool: PoolValues, labels
   };
 }
 
-const nodeAddressFile = () => ({
-  path: '/opt/elemental-capi/node-address.sh', permissions: '0755', content: NODE_ADDRESS_SCRIPT
-});
-
 /**
  * The objects in the order they are written. The Cluster comes first so that the identity Secret can
  * name it as owner; Cluster API tolerates references to objects that appear a moment later.
@@ -417,24 +398,28 @@ export function buildObjects(v: WizardValues, opts: BuildOptions): WizardObject[
     }];
   }
 
-  // One source for the control plane address, never two. With `address` the form's address is the
-  // endpoint and kube-vip announces it. With `loadBalancer` the Harvester provider creates a Harvester
-  // LoadBalancer and writes its address into spec.controlPlaneEndpoint itself; the form then writes
-  // neither an endpoint nor kube-vip.
+  // One source for the control plane address, never two.
+  // `loadBalancer`: the Harvester provider creates a Harvester LoadBalancer (address by DHCP) and writes
+  // its address into spec.controlPlaneEndpoint itself; the form writes neither an endpoint nor kube-vip.
+  // The extra listener is RKE2's registration port: joining machines reach the first server through it.
+  // `address`: the form's address is the endpoint, kube-vip announces it, and `external` tells the
+  // provider to create no load balancer and to leave the endpoint as written. Never `dhcp` together
+  // with a typed address: the provider would replace the address.
   const lb = usesLoadBalancer(v);
   const infraSpec: any = {
-    targetNamespace:    v.vmNamespace,
-    identitySecret:     { name: n.identity, namespace: ns },
-    // Required by the CRD. In `address` mode the provider only gets as far as creating the load
-    // balancer when its Harvester identity may do so, which the form checked before choosing this mode
-    loadBalancerConfig: { ipamType: 'dhcp' },
+    targetNamespace: v.vmNamespace,
+    identitySecret:  { name: n.identity, namespace: ns },
   };
 
   if (lb) {
-    infraSpec.loadBalancerConfig.listeners = [{
-      name: 'rke2-server', port: RKE2_REGISTRATION_PORT, protocol: 'TCP', backendPort: RKE2_REGISTRATION_PORT
-    }];
+    infraSpec.loadBalancerConfig = {
+      ipamType:  'dhcp',
+      listeners: [{
+        name: 'rke2-server', port: RKE2_REGISTRATION_PORT, protocol: 'TCP', backendPort: RKE2_REGISTRATION_PORT
+      }],
+    };
   } else {
+    infraSpec.loadBalancerConfig = { ipamType: 'external' };
     infraSpec.controlPlaneEndpoint = { host: v.controlPlaneHost, port: API_PORT };
   }
 
@@ -447,15 +432,7 @@ export function buildObjects(v: WizardValues, opts: BuildOptions): WizardObject[
     spec: infraSpec,
   };
 
-  const controlPlaneFiles: any[] = [nodeAddressFile()];
-
-  if (!lb) {
-    controlPlaneFiles.unshift({
-      path: '/var/lib/rancher/rke2/server/manifests/elemental-kube-vip.yaml', permissions: '0600', content: kubeVipManifest(v.controlPlaneHost)
-    });
-  }
-
-  const controlPlane = {
+  const controlPlane: any = {
     apiVersion: `${ API.controlPlane.group }/${ API.controlPlane.version }`,
     kind:       API.controlPlane.kind,
     metadata:   {
@@ -477,10 +454,16 @@ export function buildObjects(v: WizardValues, opts: BuildOptions): WizardObject[
         cloudProviderName: 'external',
         disableComponents: { kubernetesComponents: ['cloudController'] },
       },
-      files:            controlPlaneFiles,
-      postRKE2Commands: ['/opt/elemental-capi/node-address.sh'],
     },
   };
+
+  // No files at all with the load balancer. The Harvester provider publishes the node addresses itself,
+  // so no machine carries a script for that any more
+  if (!lb) {
+    controlPlane.spec.files = [{
+      path: '/var/lib/rancher/rke2/server/manifests/elemental-kube-vip.yaml', permissions: '0600', content: kubeVipManifest(v.controlPlaneHost)
+    }];
+  }
 
   const workerBootstrap = {
     apiVersion: `${ API.bootstrap.group }/${ API.bootstrap.version }`,
@@ -491,10 +474,8 @@ export function buildObjects(v: WizardValues, opts: BuildOptions): WizardObject[
     spec: {
       template: {
         spec: {
-          gzipUserData:     false,
-          agentConfig:      { airGapped: true },
-          files:            [nodeAddressFile()],
-          postRKE2Commands: ['/opt/elemental-capi/node-address.sh'],
+          gzipUserData: false,
+          agentConfig:  { airGapped: true },
         },
       },
     },

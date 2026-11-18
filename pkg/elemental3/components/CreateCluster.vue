@@ -3,6 +3,7 @@ import CruResource from '@shell/components/CruResource';
 import Loading from '@shell/components/Loading';
 import LabeledSelect from '@shell/components/form/LabeledSelect';
 import UnitInput from '@shell/components/form/UnitInput';
+import { Checkbox } from '@components/Form/Checkbox';
 import { LabeledInput } from '@components/Form/LabeledInput';
 import { Banner } from '@components/Banner';
 import { MANAGEMENT, NAMESPACE } from '@shell/config/types';
@@ -11,7 +12,7 @@ import {
   API, buildObjects, collectionPath, defaultValues, validate
 } from '../lib/objects';
 import {
-  NODE_IMAGE_TYPE, PREREQUISITES, endpointAccessReviews, endpointModeFor, harvesterBase, imageOptions, keyPairOptions, namespaceOptions,
+  NODE_IMAGE_TYPE, PREREQUISITES, endpointAccessReviews, loadBalancerRight, harvesterBase, imageOptions, keyPairOptions, namespaceOptions,
   networkOptions, nodeImageOptions, errorText
 } from '../lib/harvester';
 import { DETAIL_ROUTE, BLANK_CLUSTER } from '../product';
@@ -32,7 +33,7 @@ export default {
   emits: ['update:value'],
 
   components: {
-    CruResource, Loading, LabeledSelect, LabeledInput, UnitInput, Banner
+    CruResource, Loading, LabeledSelect, LabeledInput, UnitInput, Banner, Checkbox
   },
 
   props: {
@@ -100,8 +101,9 @@ export default {
         loading: false, namespaces: [], images: [], networks: [], keyPairs: []
       },
       harvesterError:    '',
-      // Whether the form could find out which control plane endpoint the Harvester provider will use
-      endpointCertain:   false,
+      // Whether the user's Harvester account may create and delete load balancers in the VM namespace:
+      // allowed, denied or unknown (the question could not be asked)
+      lbRight:           'unknown',
       // Until the user edits a worker size, a new worker pool takes the control plane sizes
       workerSizesEdited: false,
       errors:            [],
@@ -180,8 +182,14 @@ export default {
       return !!this.release && !this.release.verified;
     },
 
-    usesLoadBalancer() {
-      return this.form.endpointMode === 'loadBalancer';
+    // Advanced: a typed control plane address (kube-vip) instead of the Harvester load balancer
+    fixedAddress: {
+      get() {
+        return this.form.endpointMode === 'address';
+      },
+      set(on) {
+        this.form.endpointMode = on ? 'address' : 'loadBalancer';
+      },
     },
 
     detailRoute() {
@@ -315,9 +323,9 @@ export default {
     },
 
     /**
-     * Which control plane endpoint will this cluster get? The Harvester provider decides by what its
-     * Harvester identity (a kubeconfig of the logged-in user) may do, so the form asks Harvester the
-     * same two questions and writes objects for that path. It decides nothing itself.
+     * The control plane gets a Harvester load balancer, created by the Harvester provider with a
+     * kubeconfig of the logged-in user. The form asks Harvester whether that user may create and delete
+     * load balancers in the VM namespace, and only warns: the choice stays with the user.
      */
     async detectEndpointMode() {
       const clusterId = this.harvesterClusterId;
@@ -347,10 +355,7 @@ export default {
       if (clusterId !== this.harvesterClusterId || vmNamespace !== this.form.vmNamespace) {
         return;
       }
-      const { mode, certain } = endpointModeFor(answers);
-
-      this.form.endpointMode = mode;
-      this.endpointCertain = certain;
+      this.lbRight = loadBalancerRight(answers);
     },
 
     request(method, path, data) {
@@ -647,8 +652,33 @@ export default {
             data-testid="elemental3-ssh-key-pair"
           />
         </div>
+      </div>
+
+      <p
+        v-if="!fixedAddress"
+        class="text-muted mb-10"
+        data-testid="elemental3-endpoint-load-balancer"
+      >
+        {{ t('elemental3.endpoint.loadBalancer') }}
+      </p>
+      <Banner
+        v-if="lbRight === 'denied' && !fixedAddress"
+        color="warning"
+        data-testid="elemental3-endpoint-denied"
+        :label="t('elemental3.endpoint.denied', { namespace: form.vmNamespace })"
+      />
+      <div class="row mb-20">
+        <div class="col span-6">
+          <Checkbox
+            v-model:value="fixedAddress"
+            :mode="mode"
+            :label="t('elemental3.endpoint.fixedAddress')"
+            :tooltip="t('elemental3.endpoint.fixedAddressTooltip')"
+            data-testid="elemental3-fixed-address"
+          />
+        </div>
         <div
-          v-if="!usesLoadBalancer"
+          v-if="fixedAddress"
           class="col span-3"
         >
           <LabeledInput
@@ -661,19 +691,6 @@ export default {
           />
         </div>
       </div>
-
-      <Banner
-        v-if="form.vmNamespace && usesLoadBalancer"
-        color="info"
-        data-testid="elemental3-endpoint-load-balancer"
-        :label="t('elemental3.endpoint.loadBalancer')"
-      />
-      <Banner
-        v-else-if="form.vmNamespace"
-        :color="endpointCertain ? 'info' : 'warning'"
-        data-testid="elemental3-endpoint-address"
-        :label="endpointCertain ? t('elemental3.endpoint.address') : t('elemental3.endpoint.uncertain')"
-      />
 
       <div
         v-for="pool in ['controlPlane', 'workers']"

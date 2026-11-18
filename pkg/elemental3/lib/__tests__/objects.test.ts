@@ -44,7 +44,8 @@ describe('validate', () => {
   it('lists every missing required field of an empty form', () => {
     const fields = validate(defaultValues()).filter((e) => e.code === 'required').map((e) => e.field);
 
-    expect(fields).toStrictEqual(['name', 'vmNamespace', 'image', 'kubernetesVersion', 'network', 'sshKeyPair', 'controlPlaneHost']);
+    expect(fields).toStrictEqual(['name', 'vmNamespace', 'image', 'kubernetesVersion', 'network', 'sshKeyPair']);
+    expect(validate({ ...defaultValues(), endpointMode: 'address' }).filter((e) => e.code === 'required').map((e) => e.field)).toContain('controlPlaneHost');
   });
 
   it.each([
@@ -61,7 +62,8 @@ describe('validate', () => {
     ['network', 'no-namespace'],
     ['sshKeyPair', 'no-namespace'],
   ])('rejects %s = %s', (field, value) => {
-    const errors = validate(values({ [field]: value } as any));
+    // The address is only read with the advanced fixed-address option
+    const errors = validate(values({ endpointMode: 'address', [field]: value } as any));
 
     expect(errors.map((e) => e.field)).toStrictEqual([field]);
   });
@@ -149,13 +151,32 @@ describe('buildObjects', () => {
     expect(secret.metadata.ownerReferences).toBeUndefined();
   });
 
-  it('describes the Harvester side: namespace, endpoint, load balancer stanza', () => {
+  it('describes the Harvester side: namespace, identity, and a load balancer with the RKE2 registration port; no endpoint', () => {
     expect(byKey('infraCluster').spec).toStrictEqual({
-      controlPlaneEndpoint: { host: '192.0.2.10', port: 6443 },
-      targetNamespace:      'tenant',
-      identitySecret:       { name: n.identity, namespace: 'fleet-default' },
-      loadBalancerConfig:   { ipamType: 'dhcp' },
+      targetNamespace:    'tenant',
+      identitySecret:     { name: n.identity, namespace: 'fleet-default' },
+      loadBalancerConfig: {
+        ipamType:  'dhcp',
+        listeners: [{
+          name: 'rke2-server', port: 9345, protocol: 'TCP', backendPort: 9345
+        }],
+      },
     });
+    expect(byKey('infraCluster').metadata.annotations).toBeUndefined();
+  });
+
+  it('writes no address, no kube-vip, no files and no commands by default: the provider does all of it', () => {
+    const text = JSON.stringify(objects);
+
+    expect(defaultValues().endpointMode).toBe('loadBalancer');
+    expect(text).not.toContain('192.0.2.10');
+    expect(text).not.toContain('kube-vip');
+    expect(text).not.toContain('node-address');
+    expect(text).not.toContain('managed-by');
+    expect(byKey('controlPlane').spec.files).toBeUndefined();
+    expect(byKey('controlPlane').spec.postRKE2Commands).toBeUndefined();
+    expect(byKey('workerBootstrap').spec.template.spec).toStrictEqual({ gzipUserData: false, agentConfig: { airGapped: true } });
+    expect(validate(values({ controlPlaneHost: '' }))).toStrictEqual([]);
   });
 
   it('uses one release for every machine: same image and same version in all pools', () => {
@@ -195,41 +216,43 @@ describe('buildObjects', () => {
     });
   });
 
-  describe('with a Harvester load balancer as control plane endpoint', () => {
-    const lbObjects = buildObjects(values({ endpointMode: 'loadBalancer', controlPlaneHost: '' }), { kubeconfig: 'KUBECONFIG', clusterUid: 'uid-1' });
-    const lb = (key: string) => lbObjects.find((o) => o.key === key)!.object;
+  describe('with a fixed control plane address (advanced)', () => {
+    const fixed = buildObjects(values({ endpointMode: 'address' }), { kubeconfig: 'KUBECONFIG', clusterUid: 'uid-1' });
+    const fx = (key: string) => fixed.find((o) => o.key === key)!.object;
 
-    it('needs no address', () => {
-      expect(validate(values({ endpointMode: 'loadBalancer', controlPlaneHost: '' }))).toStrictEqual([]);
+    it('needs an IPv4 address', () => {
+      expect(validate(values({ endpointMode: 'address' }))).toStrictEqual([]);
       expect(validate(values({ endpointMode: 'address', controlPlaneHost: '' })).map((e) => e.field)).toStrictEqual(['controlPlaneHost']);
+      expect(validate(values({ endpointMode: 'address', controlPlaneHost: 'cp.example' })).map((e) => e.code)).toStrictEqual(['controlPlaneHost']);
     });
 
-    it('writes no endpoint and no kube-vip: the provider assigns the only address there is', () => {
-      expect(lb('infraCluster').spec.controlPlaneEndpoint).toBeUndefined();
-      expect(lb('controlPlane').spec.files.map((f: any) => f.path)).toStrictEqual(['/opt/elemental-capi/node-address.sh']);
-      expect(JSON.stringify(lbObjects)).not.toContain('kube-vip');
-    });
-
-    it('asks for the RKE2 registration port on the load balancer, next to the API port the provider adds', () => {
-      expect(lb('infraCluster').spec.loadBalancerConfig).toStrictEqual({
-        ipamType:  'dhcp',
-        listeners: [{
-          name: 'rke2-server', port: 9345, protocol: 'TCP', backendPort: 9345
-        }],
+    it('tells the provider to create no load balancer and to keep the endpoint: external, never dhcp', () => {
+      expect(fx('infraCluster').spec).toStrictEqual({
+        targetNamespace:      'tenant',
+        identitySecret:       { name: n.identity, namespace: 'fleet-default' },
+        loadBalancerConfig:   { ipamType: 'external' },
+        controlPlaneEndpoint: { host: '192.0.2.10', port: 6443 },
       });
     });
 
-    it('writes the same eight objects otherwise', () => {
-      expect(lbObjects.map((o) => o.key)).toStrictEqual(objects.map((o) => o.key));
-      expect(lb('workers').spec.template.spec.version).toBe(byKey('workers').spec.template.spec.version);
+    it('writes the typed address in exactly two places, both from the one field: endpoint and kube-vip', () => {
+      expect(JSON.stringify(fixed).split('192.0.2.10').length - 1).toBe(2);
     });
-  });
 
-  it('writes the typed address in exactly two places, both from the one field: endpoint and kube-vip', () => {
-    const text = JSON.stringify(objects);
+    it('announces the address with kube-vip on control plane machines only, and carries no other file', () => {
+      const cpFiles = fx('controlPlane').spec.files;
 
-    expect(text.split('192.0.2.10').length - 1).toBe(2);
-    expect(byKey('infraCluster').spec.controlPlaneEndpoint.host).toBe('192.0.2.10');
+      expect(cpFiles.map((f: any) => f.path)).toStrictEqual(['/var/lib/rancher/rke2/server/manifests/elemental-kube-vip.yaml']);
+      expect(cpFiles[0].content).toContain('{name: address, value: "192.0.2.10"}');
+      expect(cpFiles[0].content).toContain('{name: port, value: "6443"}');
+      expect(fx('controlPlane').spec.postRKE2Commands).toBeUndefined();
+      expect(fx('workerBootstrap').spec.template.spec).toStrictEqual({ gzipUserData: false, agentConfig: { airGapped: true } });
+    });
+
+    it('writes the same eight objects otherwise', () => {
+      expect(fixed.map((o) => o.key)).toStrictEqual(objects.map((o) => o.key));
+      expect(fx('workers').spec.template.spec.version).toBe(byKey('workers').spec.template.spec.version);
+    });
   });
 
   it('names the logged-in user as creator of the Cluster, the way Rancher does for its own clusters', () => {
@@ -243,18 +266,6 @@ describe('buildObjects', () => {
     const o = buildObjects(values({ harvesterClusterId: 'c-abcde' }), { kubeconfig: 'x' });
 
     expect(o[0].object.metadata.annotations).toStrictEqual({ 'elemental.suse.com/harvester-cluster': 'c-abcde' });
-  });
-
-  it('announces the control plane address with kube-vip on control plane machines only', () => {
-    const cpFiles = byKey('controlPlane').spec.files;
-    const workerFiles = byKey('workerBootstrap').spec.template.spec.files;
-    const vip = cpFiles.find((f: any) => f.path.endsWith('elemental-kube-vip.yaml'));
-
-    expect(vip.content).toContain('{name: address, value: "192.0.2.10"}');
-    expect(vip.content).toContain('{name: port, value: "6443"}');
-    expect(workerFiles.map((f: any) => f.path)).toStrictEqual(['/opt/elemental-capi/node-address.sh']);
-    expect(byKey('controlPlane').spec.postRKE2Commands).toStrictEqual(['/opt/elemental-capi/node-address.sh']);
-    expect(byKey('workerBootstrap').spec.template.spec.postRKE2Commands).toStrictEqual(['/opt/elemental-capi/node-address.sh']);
   });
 
   it('ties the MachineDeployment to the cluster and its templates', () => {

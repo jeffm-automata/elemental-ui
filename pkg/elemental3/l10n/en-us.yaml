@@ -25,7 +25,7 @@ elemental3:
     sshKeyPair: SSH Key Pair
     sshKeyPairTooltip: 'The Harvester provider for Cluster API requires a key pair for every machine.'
     controlPlaneHost: Control Plane Address
-    controlPlaneHostTooltip: 'A free IPv4 address on the VM network. kube-vip announces it from the control plane machines.'
+    controlPlaneHostTooltip: 'A free IPv4 address on the VM network that no DHCP server hands out.'
     count: Machine Count
     cpu: CPUs
     memory: Memory
@@ -65,9 +65,10 @@ elemental3:
     error: Error
     deleting: Deleting
   endpoint:
-    loadBalancer: 'Control plane address: assigned by Harvester. Your Harvester account may create load balancers, so the Harvester provider for Cluster API creates one for the control plane and uses its address (DHCP). No address is entered here; the cluster page shows it once it is assigned.'
-    address: 'Control plane address: the address entered above, announced by kube-vip. Your Harvester account may not create load balancers or read the Harvester system namespace, which the Harvester provider for Cluster API (v0.10.1) needs to report the infrastructure as ready. Until the provider handles that, an administrator has to mark the HarvesterCluster as ready; the cluster page shows where it waits.'
-    uncertain: 'Could not ask Harvester whether your account may create load balancers. The address entered above is used with kube-vip. If your account does have that right, the Harvester provider replaces the address with a load balancer address after creation; the cluster page shows the address in use.'
+    loadBalancer: 'Control plane address: assigned by Harvester (a load balancer in the VM namespace, address by DHCP). The cluster page shows it after creation.'
+    denied: 'Your Harvester account may not create and delete load balancers in namespace {namespace}, so the Harvester provider cannot create the one for the control plane. Ask for that right (loadbalancers.loadbalancer.harvesterhci.io: create, delete), or use a fixed address below.'
+    fixedAddress: 'Advanced: use a fixed control plane address'
+    fixedAddressTooltip: 'No Harvester load balancer is created. kube-vip announces the address you enter from the control plane machines.'
   list:
     description: 'Cluster API clusters with Elemental 3 nodes on this management cluster. A cluster appears here as soon as it is created, before Rancher has imported it.'
     create: Create
@@ -92,6 +93,7 @@ elemental3:
     deleting: 'The cluster is being deleted. Cluster API removes the machines; this page goes empty when it is gone.'
     notFound: 'There is no cluster {name} in namespace {namespace}, or it was deleted.'
     notBlocking: 'reported by the object although this part of the cluster is ready'
+    stalled: 'no change for {minutes} minutes'
   progress:
     title: Provisioning
     provisioned: 'Provisioned: every step this page can read is done.'

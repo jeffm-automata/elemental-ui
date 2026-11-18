@@ -1,5 +1,5 @@
 import {
-  clusterEvents, clusterState, conditionRows, currentPhase, isFailure, isProvisioned, machineRows, poolRows, problems, progressPhases
+  FAILURE_GRACE_SECONDS, NOT_YET_TIMEOUT_SECONDS, clusterEvents, clusterState, conditionRows, currentPhase, isFailure, isProvisioned, machineRows, poolRows, problems, progressPhases, severity
 } from '../status';
 
 const T = (type: string, extra: any = {}) => ({
@@ -63,7 +63,7 @@ describe('progressPhases', () => {
     expect(phases[1].message).toBe('deployments.apps "harvester" is forbidden');
     expect(clusterState(o)).toBe('error');
     expect(problems(o)).toStrictEqual([{
-      kind: 'HarvesterCluster', name: 'demo', type: 'HarvesterConnectionReady', reason: 'HarvesterConnectionFailed', message: 'deployments.apps "harvester" is forbidden', blocking: true
+      kind: 'HarvesterCluster', name: 'demo', type: 'HarvesterConnectionReady', reason: 'HarvesterConnectionFailed', message: 'deployments.apps "harvester" is forbidden', blocking: true, stalledMinutes: 0
     }]);
   });
 
@@ -155,6 +155,59 @@ describe('isFailure', () => {
   });
 });
 
+describe('severity over time', () => {
+  const NOW = Date.parse('2026-11-18T12:00:00Z');
+  const ago = (seconds: number) => new Date(NOW - seconds * 1000).toISOString();
+  const at = (c: any, seconds: number) => ({ ...c, lastTransitionTime: ago(seconds) });
+  const booting = F('NodeHealthy', 'NodeNotReady', '* Node.Ready: container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized');
+  const probe = F('RemoteConnectionProbe', 'ProbeFailed', 'Get "https://192.0.2.10:6443/": dial tcp: connect: connection refused');
+  const forbidden = F('HarvesterConnectionReady', 'HarvesterConnectionFailed', 'deployments.apps "harvester" is forbidden');
+
+  it('shows a booting node as in progress, for as long as a boot can take', () => {
+    expect(severity(at(booting, 30), NOW)).toBe('progress');
+    expect(severity(at(booting, 9 * 60), NOW)).toBe('progress');
+    expect(severity(at(booting, NOT_YET_TIMEOUT_SECONDS - 1), NOW)).toBe('progress');
+  });
+
+  it('turns "not yet" into an error when nothing has changed for the timeout', () => {
+    expect(severity(at(booting, NOT_YET_TIMEOUT_SECONDS + 1), NOW)).toBe('error');
+    expect(isFailure(at(booting, NOT_YET_TIMEOUT_SECONDS + 1), NOW)).toBe(true);
+  });
+
+  it('gives a failed probe or step a grace period before calling it an error', () => {
+    expect(severity(at(probe, 20), NOW)).toBe('progress');
+    expect(severity(at(probe, FAILURE_GRACE_SECONDS + 1), NOW)).toBe('error');
+    expect(severity(probe, NOW)).toBe('error');
+  });
+
+  it('shows a refusal at once: waiting does not grant a right', () => {
+    expect(severity(at(forbidden, 1), NOW)).toBe('error');
+    expect(severity(at(F('Ready', 'InvalidConfiguration', 'spec.replicas: Invalid value'), 1), NOW)).toBe('error');
+  });
+
+  it('is ok for true conditions and for "not rolling out"', () => {
+    expect(severity(T('Ready'), NOW)).toBe('ok');
+    expect(severity(F('RollingOut', 'NotRollingOut'), NOW)).toBe('ok');
+  });
+
+  it('keeps a cluster "provisioning" while its first worker boots, and "error" only after the timeout', () => {
+    const o = (seconds: number) => ({
+      cluster:            cluster([], { status: { initialization: { infrastructureProvisioned: true, controlPlaneInitialized: true } } }),
+      infra:              infra(),
+      controlPlane:       cp(1, 1),
+      machineDeployments: [{
+        metadata: { name: 'demo-md-0' }, spec: { replicas: 1 }, status: { readyReplicas: 0, conditions: [at(booting, seconds)] }
+      }],
+    });
+
+    expect(clusterState(o(8 * 60), NOW)).toBe('provisioning');
+    expect(problems(o(8 * 60), NOW)).toStrictEqual([]);
+    expect(progressPhases(o(8 * 60), NOW).find((p) => p.key === 'workers')?.state).toBe('active');
+    expect(clusterState(o(NOT_YET_TIMEOUT_SECONDS + 60), NOW)).toBe('error');
+    expect(problems(o(NOT_YET_TIMEOUT_SECONDS + 60), NOW).map((p) => p.type)).toStrictEqual(['NodeHealthy']);
+  });
+});
+
 describe('problems', () => {
   const forbidden = F('HarvesterConnectionReady', 'HarvesterConnectionFailed', 'deployments.apps "harvester" is forbidden');
 
@@ -188,7 +241,7 @@ describe('problems', () => {
     };
 
     expect(problems(o)).toStrictEqual([{
-      kind: 'Machine', name: 'demo-md-0-x', type: 'Failure', reason: '', message: 'VM could not be created', blocking: true
+      kind: 'Machine', name: 'demo-md-0-x', type: 'Failure', reason: '', message: 'VM could not be created', blocking: true, stalledMinutes: 0
     }]);
   });
 });

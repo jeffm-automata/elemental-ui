@@ -21,7 +21,15 @@ provider (CAPRKE2) and the Harvester provider (CAPHV). The extension contains no
 Needs on the management cluster: Rancher Turtles with Cluster API, CAPRKE2, CAPHV, and create rights on the kinds
 above in the chosen namespace. Optional: the Elemental image build operator (`NodeImage`), which lets the user pick
 a release instead of a Harvester image plus its Kubernetes version. Needs in Harvester: an Elemental 3 generic node
-image, a VM network, an SSH key pair, and a free address on the VM network for the control plane.
+image, a VM network, an SSH key pair, and for the user the right to create and delete load balancers
+(`loadbalancers.loadbalancer.harvesterhci.io`) in the VM namespace.
+
+Control plane address: by default the Harvester provider creates a Harvester load balancer (address by DHCP) and the
+form asks for no address (`loadBalancerConfig.ipamType: dhcp` with a listener for RKE2's port 9345, no
+`controlPlaneEndpoint`). "Advanced: use a fixed control plane address" writes `ipamType: external`, the typed
+endpoint and a kube-vip manifest instead. Both need a Harvester provider that creates the load balancer with a
+namespace-scoped identity, publishes node addresses and knows `external` (CAPHV v0.10.1 does not; the fork's
+`v0.10.1-e3p1` build does). The form writes no node address script and depends on no helper script.
 
 ## Layout
 
