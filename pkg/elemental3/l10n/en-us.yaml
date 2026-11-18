@@ -91,6 +91,7 @@ elemental3:
     deleteFailed: 'Deleting the cluster failed: {error}'
     deleting: 'The cluster is being deleted. Cluster API removes the machines; this page goes empty when it is gone.'
     notFound: 'There is no cluster {name} in namespace {namespace}, or it was deleted.'
+    notBlocking: 'reported by the object although this part of the cluster is ready'
   progress:
     title: Provisioning
     provisioned: 'Provisioned: every step this page can read is done.'

@@ -232,6 +232,13 @@ describe('buildObjects', () => {
     expect(byKey('infraCluster').spec.controlPlaneEndpoint.host).toBe('192.0.2.10');
   });
 
+  it('names the logged-in user as creator of the Cluster, the way Rancher does for its own clusters', () => {
+    const o = buildObjects(values({ creatorId: 'u-abcde' }), { kubeconfig: 'x' });
+
+    expect(o[0].object.metadata.annotations).toStrictEqual({ 'field.cattle.io/creatorId': 'u-abcde' });
+    expect(JSON.stringify(o.slice(1))).not.toContain('creatorId');
+  });
+
   it('records the Harvester cluster when it is known', () => {
     const o = buildObjects(values({ harvesterClusterId: 'c-abcde' }), { kubeconfig: 'x' });
 

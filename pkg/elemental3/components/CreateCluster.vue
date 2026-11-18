@@ -73,6 +73,15 @@ export default {
       }
     }
 
+    // Who is creating: Rancher's id of the logged-in user, for the creator annotation on the Cluster
+    try {
+      const me = await store.dispatch('rancher/request', { url: '/v3/users?me=true' });
+
+      this.form.creatorId = me?.data?.[0]?.id || '';
+    } catch (e) {
+      this.form.creatorId = '';
+    }
+
     if (this.harvesterClusterOptions.length === 1) {
       this.harvesterClusterId = this.harvesterClusterOptions[0].value;
     }

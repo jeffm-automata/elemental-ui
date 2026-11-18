@@ -47,6 +47,12 @@ export interface Problem {
   type: string;
   reason: string;
   message: string;
+  /**
+   * True while the part of the cluster the object belongs to is not ready. A failed condition that an
+   * object keeps although its part is ready (the Harvester provider keeps "connection failed" on a
+   * cluster whose infrastructure was marked ready) is still shown, as a warning.
+   */
+  blocking: boolean;
 }
 
 export interface ConditionRow extends Condition {
@@ -102,12 +108,22 @@ const FAILURE_RE = /fail|error|invalid|forbidden|denied|unauthori[sz]ed|timed? ?
 /** Conditions whose type says something is wrong when True (Cluster API: Remediating, Paused, ...) are not failures here. */
 const NEGATIVE_POLARITY = ['RollingOut', 'Remediating', 'ScalingDown', 'ScalingUp', 'Paused', 'Deleting'];
 
+/**
+ * Providers use reasons like ProbeFailed or InspectionFailed for things that simply have not happened
+ * yet ("Remote connection not established yet", "Waiting for Cluster status.infrastructureReady to be
+ * true"). Their message says so; such a condition is "not yet", not a failure.
+ */
+const NOT_YET_RE = /^waiting\b|waiting for|not (yet )?established|not yet|in progress/i;
+
 /** True when a condition reports a failure, as opposed to "not yet". */
 export function isFailure(c: Condition): boolean {
   if (!c || NEGATIVE_POLARITY.includes(c.type)) {
     return false;
   }
   if (c.status === 'True') {
+    return false;
+  }
+  if (NOT_YET_RE.test(c.message || '')) {
     return false;
   }
 
@@ -259,17 +275,32 @@ export function conditionRows(o: ClusterObjects): ConditionRow[] {
   ];
 }
 
-/** Conditions that report a failure, plus failure messages of machines. Shown as error banners. */
+const PHASE_OF_KIND: Record<string, Phase['key']> = {
+  HarvesterCluster: 'infrastructure', RKE2ControlPlane: 'controlPlane', MachineDeployment: 'workers'
+};
+
+/** Conditions that report a failure, plus failure messages of machines. Shown as banners. */
 export function problems(o: ClusterObjects): Problem[] {
+  const phases = progressPhases(o);
+  const unfinished = (key: Phase['key']) => !['done', 'skipped'].includes(phases.find((p) => p.key === key)?.state || '');
+  const provisioned = isProvisioned(phases);
+  const machinePhase = (name: string) => (o.machines || []).find((m) => m.metadata?.name === name)?.status?.phase;
+  const blocking = (kind: string, name: string) => {
+    if (kind === 'Machine') {
+      return machinePhase(name) !== 'Running';
+    }
+
+    return PHASE_OF_KIND[kind] ? unfinished(PHASE_OF_KIND[kind]) : !provisioned;
+  };
   const out: Problem[] = conditionRows(o).filter(isFailure).map((c) => ({
-    kind: c.kind, name: c.name, type: c.type, reason: c.reason || '', message: c.message || ''
+    kind: c.kind, name: c.name, type: c.type, reason: c.reason || '', message: c.message || '', blocking: blocking(c.kind, c.name)
   }));
   const failed = (kind: string, obj: any) => {
     const msg = obj?.status?.failureMessage;
 
     if (msg) {
       out.push({
-        kind, name: obj.metadata?.name || '', type: 'Failure', reason: obj.status?.failureReason || '', message: msg
+        kind, name: obj.metadata?.name || '', type: 'Failure', reason: obj.status?.failureReason || '', message: msg, blocking: true
       });
     }
   };

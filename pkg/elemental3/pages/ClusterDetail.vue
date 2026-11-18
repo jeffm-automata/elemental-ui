@@ -91,7 +91,15 @@ export default {
   },
 
   mounted() {
-    this.timer = setInterval(() => this.load(), REFRESH_MS);
+    let n = 0;
+
+    // Rights can arrive after the page was opened (the owner's rights follow the import): asked again once a minute
+    this.timer = setInterval(() => {
+      this.load();
+      if (++n % 6 === 0) {
+        this.loadRights();
+      }
+    }, REFRESH_MS);
   },
 
   beforeUnmount() {
@@ -380,7 +388,7 @@ export default {
         optional(() => (cpName ? this.mgmt('get', objectPath(API.controlPlane, ns, cpName)) : null), null),
         optional(() => this.mgmt('get', collectionPath(API.md, ns) + selector), { items: [] }),
         optional(() => this.mgmt('get', collectionPath(API.infraMachine, ns)), { items: [] }),
-        guarded('machines', READ_API.machine, () => this.mgmt('get', collectionPath(READ_API.machine, ns) + selector)),
+        guarded('machines', READ_API.machine, () => this.listMachines(ns, selector)),
         guarded('events', READ_API.event, () => this.mgmt('get', collectionPath(READ_API.event, ns))),
       ]);
 
@@ -394,6 +402,28 @@ export default {
 
       if (this.rancherReady) {
         await this.loadWorkload();
+      }
+    },
+
+    /**
+     * Machines of the cluster. A user whose rights name the cluster's objects one by one (Rancher's
+     * per-cluster owner Role) is refused a plain list; Rancher's own API lists what such a user may read.
+     */
+    async listMachines(ns, selector) {
+      try {
+        return await this.mgmt('get', collectionPath(READ_API.machine, ns) + selector);
+      } catch (e) {
+        if (httpStatus(e) !== 403) {
+          throw e;
+        }
+        const res = await this.request('get', `/v1/${ READ_API.machine.group }.${ READ_API.machine.resource }/${ ns }`);
+        const items = (res?.data || []).filter((m) => m.metadata?.labels?.[CLUSTER_NAME_LABEL] === this.name);
+
+        if (!items.length) {
+          throw e;
+        }
+
+        return { items };
       }
     },
 
@@ -441,24 +471,23 @@ export default {
       if (!this.cluster) {
         return;
       }
+      // Asked for the cluster's own objects by name: rights may be granted per object
+      const mdName = this.machineDeployments[0]?.metadata?.name;
+      const cpName = this.cluster.spec?.controlPlaneRef?.name;
       const [md, cp, del] = await Promise.all([
-        this.review(MGMT_API, API.md, 'patch'),
-        this.review(MGMT_API, API.controlPlane, 'patch'),
+        mdName ? this.review(MGMT_API, API.md, 'patch', mdName) : Promise.resolve(null),
+        this.review(MGMT_API, API.controlPlane, 'patch', cpName),
         this.review(MGMT_API, API.cluster, 'delete', this.name),
       ]);
 
       this.can = {
         scaleWorkers: md === true, scaleControlPlane: cp === true, deleteCluster: del === true
       };
-      if (md === false) {
-        this.deny('scaleWorkers', API.md, 'patch');
-      }
-      if (cp === false) {
-        this.deny('scaleControlPlane', API.controlPlane, 'patch');
-      }
-      if (del === false) {
-        this.deny('deleteCluster', API.cluster, 'delete');
-      }
+      const mark = (key, allowed, api, verb) => (allowed === false ? this.deny(key, api, verb) : this.allow(key));
+
+      mark('scaleWorkers', md, API.md, 'patch');
+      mark('scaleControlPlane', cp, API.controlPlane, 'patch');
+      mark('deleteCluster', del, API.cluster, 'delete');
     },
 
     /** Releases the management side knows about: delivered node images, annotated Harvester images, other clusters. */
@@ -725,10 +754,11 @@ export default {
       <Banner
         v-for="(p, i) in problemList"
         :key="`problem-${ i }`"
-        color="error"
+        :color="p.blocking ? 'error' : 'warning'"
         data-testid="elemental3-detail-problem"
+        :data-blocking="`${ p.blocking }`"
       >
-        <span><b>{{ p.kind }} {{ p.name }}</b> · {{ p.type }}<template v-if="p.reason"> ({{ p.reason }})</template>: {{ p.message }}</span>
+        <span><b>{{ p.kind }} {{ p.name }}</b> · {{ p.type }}<template v-if="p.reason"> ({{ p.reason }})</template>: {{ p.message }}<template v-if="!p.blocking"> — {{ t('elemental3.detail.notBlocking') }}</template></span>
       </Banner>
       <Banner
         v-if="deniedList.length"

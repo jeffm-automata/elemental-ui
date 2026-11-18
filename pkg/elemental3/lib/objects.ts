@@ -17,6 +17,8 @@ export const CREATED_BY_LABEL = 'elemental.suse.com/created-by';
 export const CREATED_BY_VALUE = 'elemental3-ui';
 export const RELEASE_ANNOTATION = 'elemental.suse.com/release-manifest';
 export const HARVESTER_CLUSTER_ANNOTATION = 'elemental.suse.com/harvester-cluster';
+/** Rancher's creator annotation. Rancher Turtles can carry it to the imported cluster, which makes the creator its owner */
+export const CREATOR_ANNOTATION = 'field.cattle.io/creatorId';
 
 export const KUBE_VIP_IMAGE = 'ghcr.io/kube-vip/kube-vip:v1.3.1';
 export const API_PORT = 6443;
@@ -65,6 +67,8 @@ export interface WizardValues {
   namespace: string;
   /** Rancher id of the Harvester cluster the machines run on. Recorded as an annotation only */
   harvesterClusterId?: string;
+  /** Rancher id of the logged-in user (for example u-abcde). Recorded as the creator annotation only */
+  creatorId?: string;
   /** Harvester namespace the VMs are created in */
   vmNamespace: string;
   /** Harvester image as namespace/name */
@@ -368,6 +372,9 @@ export function buildObjects(v: WizardValues, opts: BuildOptions): WizardObject[
 
   if (v.releaseManifest) {
     annotations[RELEASE_ANNOTATION] = v.releaseManifest;
+  }
+  if (v.creatorId) {
+    annotations[CREATOR_ANNOTATION] = v.creatorId;
   }
   if (v.harvesterClusterId) {
     annotations[HARVESTER_CLUSTER_ANNOTATION] = v.harvesterClusterId;

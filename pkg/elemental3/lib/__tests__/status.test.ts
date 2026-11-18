@@ -63,7 +63,7 @@ describe('progressPhases', () => {
     expect(phases[1].message).toBe('deployments.apps "harvester" is forbidden');
     expect(clusterState(o)).toBe('error');
     expect(problems(o)).toStrictEqual([{
-      kind: 'HarvesterCluster', name: 'demo', type: 'HarvesterConnectionReady', reason: 'HarvesterConnectionFailed', message: 'deployments.apps "harvester" is forbidden'
+      kind: 'HarvesterCluster', name: 'demo', type: 'HarvesterConnectionReady', reason: 'HarvesterConnectionFailed', message: 'deployments.apps "harvester" is forbidden', blocking: true
     }]);
   });
 
@@ -142,9 +142,53 @@ describe('isFailure', () => {
     expect(isFailure(T('Ready'))).toBe(false);
   });
 
+  it('reads the providers\' "not yet" messages as waiting although their reason says failed (seen in the lab)', () => {
+    expect(isFailure(F('RemoteConnectionProbe', 'ProbeFailed', 'Remote connection not established yet'))).toBe(false);
+    expect(isFailure(F('EtcdClusterHealthy', 'InspectionFailed', 'Waiting for Cluster status.infrastructureReady to be true'))).toBe(false);
+    expect(isFailure(F('HarvesterConnectionReady', 'HarvesterConnectionFailed', 'Harvester deployment not found: deployments.apps "harvester" is forbidden'))).toBe(true);
+  });
+
   it('does not read "not rolling out" as a failure', () => {
     expect(isFailure(F('RollingOut', 'NotRollingOut'))).toBe(false);
     expect(isFailure(F('Remediating', 'NotRemediating'))).toBe(false);
+  });
+});
+
+describe('problems', () => {
+  const forbidden = F('HarvesterConnectionReady', 'HarvesterConnectionFailed', 'deployments.apps "harvester" is forbidden');
+
+  it('a failure an object keeps after its part became ready is listed, not blocking, and the cluster is not in error', () => {
+    const o = {
+      cluster: cluster([T('InfrastructureReady'), T('ControlPlaneInitialized')]), infra: infra([forbidden]), controlPlane: cp(1, 1), machineDeployments: [md(1, 1)], machines: null
+    };
+
+    expect(problems(o).map((p) => [p.kind, p.blocking])).toStrictEqual([['HarvesterCluster', false]]);
+    expect(clusterState(o)).toBe('ready');
+    expect(progressPhases(o)[1].state).toBe('done');
+  });
+
+  it('while the control plane waits for the infrastructure, only the infrastructure is in error', () => {
+    const o = {
+      cluster:            cluster([F('InfrastructureReady', 'NotReady'), F('RemoteConnectionProbe', 'ProbeFailed', 'Remote connection not established yet')]),
+      infra:              infra([forbidden]),
+      controlPlane:       cp(1, 0, [F('EtcdClusterHealthy', 'InspectionFailed', 'Waiting for Cluster status.infrastructureReady to be true')]),
+      machineDeployments: [md(1, 0)],
+      machines:           null,
+    };
+
+    expect(states(o)).toStrictEqual(['written:done', 'infrastructure:error', 'controlPlane:waiting', 'workers:waiting', 'rancher:unknown']);
+    expect(problems(o).map((p) => p.kind)).toStrictEqual(['HarvesterCluster']);
+  });
+
+  it('a machine failure is blocking until the machine runs', () => {
+    const machines = [{ metadata: { name: 'demo-md-0-x' }, status: { phase: 'Failed', failureMessage: 'VM could not be created' } }];
+    const o = {
+      cluster: cluster([T('InfrastructureReady'), T('ControlPlaneInitialized')]), infra: infra(), controlPlane: cp(1, 1), machineDeployments: [md(1, 0)], machines
+    };
+
+    expect(problems(o)).toStrictEqual([{
+      kind: 'Machine', name: 'demo-md-0-x', type: 'Failure', reason: '', message: 'VM could not be created', blocking: true
+    }]);
   });
 });
 
