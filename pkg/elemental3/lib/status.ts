@@ -128,12 +128,16 @@ const NOT_YET_RE = /^waiting\b|waiting for|not (yet )?established|not yet|in pro
 const TERMINAL_RE = /forbidden|denied|unauthori[sz]ed|invalid|unprocessable|quota|giving up|will not (be )?retr/i;
 
 /**
- * A new machine reports "failed" probes and a not-ready node for minutes while it boots (no CNI yet,
- * kubelet not registered, API not reachable). Such a condition is shown as in progress, and becomes an
- * error only when it has not changed for this long.
+ * On a part of the cluster that is up, a condition that reports a failure (a failed probe, a failed
+ * step) is shown as in progress for this long, then as an error: controllers retry.
  */
 export const FAILURE_GRACE_SECONDS = 5 * 60;
-/** A condition that only says "not yet" becomes an error when it has not changed for this long. */
+/**
+ * While a part of the cluster is still being brought up, its objects report "failed" probes and
+ * not-ready nodes for as long as a machine takes to boot and join (API not reachable, no CNI yet; the
+ * Cluster's connection probe fails from the first second until the control plane answers). Those, and
+ * every condition that only says "not yet", become an error when they have not changed for this long.
+ */
 export const NOT_YET_TIMEOUT_SECONDS = 30 * 60;
 
 export type Severity = 'ok' | 'progress' | 'error';
@@ -146,12 +150,13 @@ function ageSeconds(c: Condition, now: number): number | null {
 
 /**
  * What a condition means for the user right now.
- * `error`: a refusal (at once), a failure that has lasted longer than FAILURE_GRACE_SECONDS, or a
+ * `error`: a refusal (at once), a failure that has lasted longer than `grace` (FAILURE_GRACE_SECONDS;
+ * the callers pass NOT_YET_TIMEOUT_SECONDS for a part of the cluster that is still coming up), or a
  * "not yet" that has lasted longer than NOT_YET_TIMEOUT_SECONDS. A failure without a transition time
  * is an error: its age is unknown.
  * `progress`: not true yet, and nothing says it will not become true.
  */
-export function severity(c: Condition, now: number = Date.now()): Severity {
+export function severity(c: Condition, now: number = Date.now(), grace: number = FAILURE_GRACE_SECONDS): Severity {
   if (!c || NEGATIVE_POLARITY.includes(c.type) || c.status === 'True') {
     return 'ok';
   }
@@ -166,7 +171,7 @@ export function severity(c: Condition, now: number = Date.now()): Severity {
     return age !== null && age > NOT_YET_TIMEOUT_SECONDS ? 'error' : 'progress';
   }
   if (FAILURE_RE.test(reason) || FAILURE_RE.test(message)) {
-    return age === null || age > FAILURE_GRACE_SECONDS ? 'error' : 'progress';
+    return age === null || age > grace ? 'error' : 'progress';
   }
 
   return 'progress';
@@ -184,8 +189,8 @@ export function stalledMinutes(c: Condition, now: number = Date.now()): number {
 }
 
 /** True when a condition reports a failure, as opposed to "not yet" or a failure too young to count. */
-export function isFailure(c: Condition, now: number = Date.now()): boolean {
-  return severity(c, now) === 'error';
+export function isFailure(c: Condition, now: number = Date.now(), grace: number = FAILURE_GRACE_SECONDS): boolean {
+  return severity(c, now, grace) === 'error';
 }
 
 function num(n: any): number {
@@ -219,7 +224,8 @@ export function workerTotals(o: ClusterObjects): { desired: number; ready: numbe
  * (or `error` when one of its objects reports a failure); the ones after it are `waiting`.
  */
 export function progressPhases(o: ClusterObjects, now: number = Date.now()): Phase[] {
-  const failing = (c: Condition) => isFailure(c, now);
+  // A phase asks about failures only while it is not done, that is while its machines are coming up
+  const failing = (c: Condition) => isFailure(c, now, NOT_YET_TIMEOUT_SECONDS);
   const out: Phase[] = [];
   const cluster = o.cluster;
   const cp = o.controlPlane;
@@ -351,7 +357,9 @@ export function problems(o: ClusterObjects, now: number = Date.now()): Problem[]
 
     return PHASE_OF_KIND[kind] ? unfinished(PHASE_OF_KIND[kind]) : !provisioned;
   };
-  const out: Problem[] = conditionRows(o).filter((c) => isFailure(c, now)).map((c) => ({
+  // An object of a part that is still coming up gets the boot timeout; one of a part that is up, the short grace
+  const graceFor = (c: ConditionRow) => (blocking(c.kind, c.name) ? NOT_YET_TIMEOUT_SECONDS : FAILURE_GRACE_SECONDS);
+  const out: Problem[] = conditionRows(o).filter((c) => isFailure(c, now, graceFor(c))).map((c) => ({
     kind: c.kind, name: c.name, type: c.type, reason: c.reason || '', message: c.message || '', blocking: blocking(c.kind, c.name), stalledMinutes: stalledMinutes(c, now)
   }));
   const failed = (kind: string, obj: any) => {

@@ -190,6 +190,30 @@ describe('severity over time', () => {
     expect(severity(F('RollingOut', 'NotRollingOut'), NOW)).toBe('ok');
   });
 
+  it('does not call the connection probe of a cluster whose control plane is still booting an error (seen in the lab at 5 minutes)', () => {
+    const o = (seconds: number) => ({
+      cluster:            cluster([], { status: { initialization: { infrastructureProvisioned: true }, conditions: [at(F('RemoteConnectionProbe', 'ProbeFailed', 'Remote connection probe failed'), seconds), at(F('Available', 'NotAvailable', '* RemoteConnectionProbe: Remote connection probe failed'), seconds)] } }),
+      infra:              infra(),
+      controlPlane:       cp(1, 0),
+      machineDeployments: [md(1, 0)],
+    });
+
+    expect(problems(o(6 * 60), NOW)).toStrictEqual([]);
+    expect(clusterState(o(6 * 60), NOW)).toBe('provisioning');
+    expect(problems(o(NOT_YET_TIMEOUT_SECONDS + 60), NOW).map((p) => p.type)).toStrictEqual(['RemoteConnectionProbe', 'Available']);
+  });
+
+  it('calls the same probe failure an error after the short grace once the cluster is up', () => {
+    const up = {
+      cluster:            cluster([], { status: { initialization: { infrastructureProvisioned: true, controlPlaneInitialized: true }, conditions: [at(F('RemoteConnectionProbe', 'ProbeFailed', 'Remote connection probe failed'), 6 * 60)] } }),
+      infra:              infra(),
+      controlPlane:       cp(1, 1),
+      machineDeployments: [md(1, 1)],
+    };
+
+    expect(problems(up, NOW).map((p) => p.type)).toStrictEqual(['RemoteConnectionProbe']);
+  });
+
   it('keeps a cluster "provisioning" while its first worker boots, and "error" only after the timeout', () => {
     const o = (seconds: number) => ({
       cluster:            cluster([], { status: { initialization: { infrastructureProvisioned: true, controlPlaneInitialized: true } } }),
