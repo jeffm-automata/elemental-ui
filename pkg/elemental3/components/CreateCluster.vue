@@ -11,8 +11,10 @@ import {
   API, buildObjects, collectionPath, defaultValues, validate
 } from '../lib/objects';
 import {
-  NODE_IMAGE_TYPE, PREREQUISITES, harvesterBase, imageOptions, keyPairOptions, namespaceOptions, networkOptions, nodeImageOptions, errorText
+  NODE_IMAGE_TYPE, PREREQUISITES, endpointAccessReviews, endpointModeFor, harvesterBase, imageOptions, keyPairOptions, namespaceOptions,
+  networkOptions, nodeImageOptions, errorText
 } from '../lib/harvester';
+import { DETAIL_ROUTE, BLANK_CLUSTER } from '../product';
 
 const MGMT_API = '/k8s/clusters/local';
 const PLACEHOLDER_UID = '00000000-0000-0000-0000-000000000000';
@@ -89,6 +91,8 @@ export default {
         loading: false, namespaces: [], images: [], networks: [], keyPairs: []
       },
       harvesterError:    '',
+      // Whether the form could find out which control plane endpoint the Harvester provider will use
+      endpointCertain:   false,
       // Until the user edits a worker size, a new worker pool takes the control plane sizes
       workerSizesEdited: false,
       errors:            [],
@@ -148,7 +152,11 @@ export default {
       const plain = imageOptions(this.harvester.images)
         .filter((o) => !known.includes(o.value.image))
         .map((o) => ({
-          info: o.value, value: o.value.image, label: this.t('elemental3.releaseOption.image', { name: o.name })
+          info:  o.value,
+          value: o.value.image,
+          label: o.value.verified ? this.t('elemental3.releaseOption.annotatedImage', {
+            release: o.release, version: o.value.kubernetesVersion, name: o.name
+          }) : this.t('elemental3.releaseOption.image', { name: o.name }),
         }));
 
       return [...fromOperator, ...plain];
@@ -158,9 +166,22 @@ export default {
       return this.releaseOptions.find((o) => o.value === this.releaseKey)?.info || null;
     },
 
-    // Asked only when the selected image does not say which RKE2 it contains
+    // Asked only when nothing says which RKE2 the selected image contains
     needsKubernetesVersion() {
-      return !!this.release && !this.release.fromOperator;
+      return !!this.release && !this.release.verified;
+    },
+
+    usesLoadBalancer() {
+      return this.form.endpointMode === 'loadBalancer';
+    },
+
+    detailRoute() {
+      return {
+        name:   DETAIL_ROUTE,
+        params: {
+          cluster: BLANK_CLUSTER, namespace: this.form.namespace, id: this.form.name
+        },
+      };
     },
 
     vmNamespaceOptions() {
@@ -205,6 +226,7 @@ export default {
   watch: {
     harvesterClusterId: {
       handler(neu) {
+        this.form.harvesterClusterId = neu || '';
         if (neu) {
           this.loadHarvester(neu);
         }
@@ -232,6 +254,7 @@ export default {
     },
 
     'form.vmNamespace'() {
+      this.detectEndpointMode();
       // Key pairs are namespaced: keep the selection only if it still applies, and preselect a single choice
       const options = this.keyPairOptionsList.map((o) => o.value);
 
@@ -280,6 +303,45 @@ export default {
       if (this.networkOptionsList.length === 1) {
         this.form.network = this.networkOptionsList[0].value;
       }
+    },
+
+    /**
+     * Which control plane endpoint will this cluster get? The Harvester provider decides by what its
+     * Harvester identity (a kubeconfig of the logged-in user) may do, so the form asks Harvester the
+     * same two questions and writes objects for that path. It decides nothing itself.
+     */
+    async detectEndpointMode() {
+      const clusterId = this.harvesterClusterId;
+      const vmNamespace = this.form.vmNamespace;
+
+      if (!clusterId || !vmNamespace) {
+        return;
+      }
+      const url = `/k8s/clusters/${ clusterId }/apis/authorization.k8s.io/v1/selfsubjectaccessreviews`;
+      const answers = await Promise.all(endpointAccessReviews(vmNamespace).map(async(r) => {
+        try {
+          const res = await this.$store.dispatch('management/request', {
+            url,
+            method:  'post',
+            headers: { 'content-type': 'application/json' },
+            data:    {
+              apiVersion: 'authorization.k8s.io/v1', kind: 'SelfSubjectAccessReview', spec: r.spec
+            }
+          });
+
+          return res?.status?.allowed === true;
+        } catch (e) {
+          return null;
+        }
+      }));
+
+      if (clusterId !== this.harvesterClusterId || vmNamespace !== this.form.vmNamespace) {
+        return;
+      }
+      const { mode, certain } = endpointModeFor(answers);
+
+      this.form.endpointMode = mode;
+      this.endpointCertain = certain;
     },
 
     request(method, path, data) {
@@ -396,7 +458,9 @@ export default {
       }
 
       btnCb(true);
-      this.$router.push(this.doneRoute);
+      // To the cluster's own page: it shows what is happening from the first second on. Rancher's
+      // cluster list shows the cluster only after Rancher Turtles has imported it.
+      this.$router.push(this.detailRoute);
     },
 
     sizeEdited(pool) {
@@ -528,6 +592,12 @@ export default {
           />
         </div>
       </div>
+      <Banner
+        v-if="needsKubernetesVersion"
+        color="warning"
+        data-testid="elemental3-unverified-image"
+        :label="t('elemental3.release.unverifiedImage')"
+      />
       <p class="text-muted mb-20">
         {{ t('elemental3.arch') }}
       </p>
@@ -568,7 +638,10 @@ export default {
             data-testid="elemental3-ssh-key-pair"
           />
         </div>
-        <div class="col span-3">
+        <div
+          v-if="!usesLoadBalancer"
+          class="col span-3"
+        >
           <LabeledInput
             v-model:value="form.controlPlaneHost"
             :mode="mode"
@@ -579,6 +652,19 @@ export default {
           />
         </div>
       </div>
+
+      <Banner
+        v-if="form.vmNamespace && usesLoadBalancer"
+        color="info"
+        data-testid="elemental3-endpoint-load-balancer"
+        :label="t('elemental3.endpoint.loadBalancer')"
+      />
+      <Banner
+        v-else-if="form.vmNamespace"
+        :color="endpointCertain ? 'info' : 'warning'"
+        data-testid="elemental3-endpoint-address"
+        :label="endpointCertain ? t('elemental3.endpoint.address') : t('elemental3.endpoint.uncertain')"
+      />
 
       <div
         v-for="pool in ['controlPlane', 'workers']"

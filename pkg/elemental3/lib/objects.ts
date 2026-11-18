@@ -16,6 +16,7 @@ export const DEPLOYMENT_NAME_LABEL = 'cluster.x-k8s.io/deployment-name';
 export const CREATED_BY_LABEL = 'elemental.suse.com/created-by';
 export const CREATED_BY_VALUE = 'elemental3-ui';
 export const RELEASE_ANNOTATION = 'elemental.suse.com/release-manifest';
+export const HARVESTER_CLUSTER_ANNOTATION = 'elemental.suse.com/harvester-cluster';
 
 export const KUBE_VIP_IMAGE = 'ghcr.io/kube-vip/kube-vip:v1.3.1';
 export const API_PORT = 6443;
@@ -62,6 +63,8 @@ export interface WizardValues {
   name: string;
   /** Namespace on the management cluster that holds the Cluster API objects */
   namespace: string;
+  /** Rancher id of the Harvester cluster the machines run on. Recorded as an annotation only */
+  harvesterClusterId?: string;
   /** Harvester namespace the VMs are created in */
   vmNamespace: string;
   /** Harvester image as namespace/name */
@@ -74,7 +77,13 @@ export interface WizardValues {
   network: string;
   /** Harvester KeyPair as namespace/name (CAPHV requires one) */
   sshKeyPair: string;
-  /** Control plane address announced by kube-vip */
+  /**
+   * Who provides the control plane address.
+   * `address`: the address in controlPlaneHost, announced by kube-vip on the control plane machines.
+   * `loadBalancer`: a Harvester LoadBalancer that the Harvester provider creates; Harvester assigns the address.
+   */
+  endpointMode?: 'address' | 'loadBalancer';
+  /** Control plane address announced by kube-vip (endpointMode address) */
   controlPlaneHost: string;
   controlPlane: PoolValues;
   workers: PoolValues;
@@ -108,6 +117,7 @@ export function defaultValues(): WizardValues {
     releaseManifest:   '',
     network:           '',
     sshKeyPair:        '',
+    endpointMode:      'address',
     controlPlaneHost:  '',
     controlPlane:      { ...DEFAULT_POOL },
     workers:           { ...DEFAULT_POOL, count: 0 },
@@ -135,6 +145,13 @@ export function isIPv4(value: string): boolean {
   return parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255 && String(Number(p)) === p);
 }
 
+export function usesLoadBalancer(v: WizardValues): boolean {
+  return v.endpointMode === 'loadBalancer';
+}
+
+/** RKE2's registration port: joining machines reach the first server through it */
+export const RKE2_REGISTRATION_PORT = 9345;
+
 function positiveInt(n: any, min: number): boolean {
   return Number.isInteger(n) && n >= min;
 }
@@ -145,7 +162,11 @@ function positiveInt(n: any, min: number): boolean {
  */
 export function validate(v: WizardValues): { field: string; code: string; params?: any }[] {
   const out: { field: string; code: string; params?: any }[] = [];
-  const required: (keyof WizardValues)[] = ['name', 'namespace', 'vmNamespace', 'image', 'kubernetesVersion', 'network', 'sshKeyPair', 'controlPlaneHost'];
+  const required: (keyof WizardValues)[] = ['name', 'namespace', 'vmNamespace', 'image', 'kubernetesVersion', 'network', 'sshKeyPair'];
+
+  if (!usesLoadBalancer(v)) {
+    required.push('controlPlaneHost');
+  }
 
   required.forEach((field) => {
     if (!v[field]) {
@@ -161,7 +182,7 @@ export function validate(v: WizardValues): { field: string; code: string; params
   if (v.kubernetesVersion && !VERSION_RE.test(v.kubernetesVersion)) {
     out.push({ field: 'kubernetesVersion', code: 'kubernetesVersion' });
   }
-  if (v.controlPlaneHost && !isIPv4(v.controlPlaneHost)) {
+  if (!usesLoadBalancer(v) && v.controlPlaneHost && !isIPv4(v.controlPlaneHost)) {
     out.push({ field: 'controlPlaneHost', code: 'controlPlaneHost' });
   }
   (['image', 'network', 'sshKeyPair'] as (keyof WizardValues)[]).forEach((field) => {
@@ -348,6 +369,9 @@ export function buildObjects(v: WizardValues, opts: BuildOptions): WizardObject[
   if (v.releaseManifest) {
     annotations[RELEASE_ANNOTATION] = v.releaseManifest;
   }
+  if (v.harvesterClusterId) {
+    annotations[HARVESTER_CLUSTER_ANNOTATION] = v.harvesterClusterId;
+  }
 
   const cluster = {
     apiVersion: `${ API.cluster.group }/${ API.cluster.version }`,
@@ -386,20 +410,43 @@ export function buildObjects(v: WizardValues, opts: BuildOptions): WizardObject[
     }];
   }
 
+  // One source for the control plane address, never two. With `address` the form's address is the
+  // endpoint and kube-vip announces it. With `loadBalancer` the Harvester provider creates a Harvester
+  // LoadBalancer and writes its address into spec.controlPlaneEndpoint itself; the form then writes
+  // neither an endpoint nor kube-vip.
+  const lb = usesLoadBalancer(v);
+  const infraSpec: any = {
+    targetNamespace:    v.vmNamespace,
+    identitySecret:     { name: n.identity, namespace: ns },
+    // Required by the CRD. In `address` mode the provider only gets as far as creating the load
+    // balancer when its Harvester identity may do so, which the form checked before choosing this mode
+    loadBalancerConfig: { ipamType: 'dhcp' },
+  };
+
+  if (lb) {
+    infraSpec.loadBalancerConfig.listeners = [{
+      name: 'rke2-server', port: RKE2_REGISTRATION_PORT, protocol: 'TCP', backendPort: RKE2_REGISTRATION_PORT
+    }];
+  } else {
+    infraSpec.controlPlaneEndpoint = { host: v.controlPlaneHost, port: API_PORT };
+  }
+
   const infraCluster = {
     apiVersion: `${ API.infraCluster.group }/${ API.infraCluster.version }`,
     kind:       API.infraCluster.kind,
     metadata:   {
       name: n.infraCluster, namespace: ns, labels
     },
-    spec: {
-      controlPlaneEndpoint: { host: v.controlPlaneHost, port: API_PORT },
-      targetNamespace:      v.vmNamespace,
-      identitySecret:       { name: n.identity, namespace: ns },
-      // Required by the CRD
-      loadBalancerConfig:   { ipamType: 'dhcp' },
-    },
+    spec: infraSpec,
   };
+
+  const controlPlaneFiles: any[] = [nodeAddressFile()];
+
+  if (!lb) {
+    controlPlaneFiles.unshift({
+      path: '/var/lib/rancher/rke2/server/manifests/elemental-kube-vip.yaml', permissions: '0600', content: kubeVipManifest(v.controlPlaneHost)
+    });
+  }
 
   const controlPlane = {
     apiVersion: `${ API.controlPlane.group }/${ API.controlPlane.version }`,
@@ -423,12 +470,7 @@ export function buildObjects(v: WizardValues, opts: BuildOptions): WizardObject[
         cloudProviderName: 'external',
         disableComponents: { kubernetesComponents: ['cloudController'] },
       },
-      files: [
-        {
-          path: '/var/lib/rancher/rke2/server/manifests/elemental-kube-vip.yaml', permissions: '0600', content: kubeVipManifest(v.controlPlaneHost)
-        },
-        nodeAddressFile(),
-      ],
+      files:            controlPlaneFiles,
       postRKE2Commands: ['/opt/elemental-capi/node-address.sh'],
     },
   };
@@ -506,4 +548,43 @@ export function collectionPath(api: ApiRef, namespace: string): string {
   const prefix = api.group ? `/apis/${ api.group }/${ api.version }` : `/api/${ api.version }`;
 
   return `${ prefix }/namespaces/${ namespace }/${ api.resource }`;
+}
+
+/** Path of one object. */
+export function objectPath(api: ApiRef, namespace: string, name: string): string {
+  return `${ collectionPath(api, namespace) }/${ name }`;
+}
+
+/** Kinds the detail page reads but the wizard does not write. */
+export const READ_API = {
+  machine: {
+    group: 'cluster.x-k8s.io', version: 'v1beta2', resource: 'machines', kind: 'Machine'
+  },
+  event: {
+    group: '', version: 'v1', resource: 'events', kind: 'Event'
+  },
+};
+
+/** Body of a SelfSubjectAccessReview for one verb on one resource. */
+export function accessReview(api: ApiRef, verb: string, namespace: string, name?: string): any {
+  const resourceAttributes: any = {
+    group: api.group, resource: api.resource, verb, namespace
+  };
+
+  if (name) {
+    resourceAttributes.name = name;
+  }
+
+  return {
+    apiVersion: 'authorization.k8s.io/v1', kind: 'SelfSubjectAccessReview', spec: { resourceAttributes }
+  };
+}
+
+export const ACCESS_REVIEW_PATH = '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews';
+
+/** "patch machinedeployments.cluster.x-k8s.io in namespace x": the right as it has to be granted. */
+export function rightText(api: ApiRef, verb: string, namespace?: string): string {
+  const res = api.group ? `${ api.resource }.${ api.group }` : api.resource;
+
+  return namespace ? `${ verb } ${ res } in namespace ${ namespace }` : `${ verb } ${ res }`;
 }

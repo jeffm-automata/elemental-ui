@@ -19,7 +19,7 @@ elemental3:
     release: Elemental Release
     releasePlaceholder: Select a release
     kubernetesVersion: Kubernetes Version
-    kubernetesVersionTooltip: 'The RKE2 version this image contains, for example v1.37.2+rke2r1. Only asked when the image was not delivered by the image build operator.'
+    kubernetesVersionTooltip: 'The RKE2 version this image contains, for example v1.37.2+rke2r1. Only asked when neither the image build operator nor the annotations of the image say it.'
     vmNamespace: VM Namespace
     network: Network Name
     sshKeyPair: SSH Key Pair
@@ -32,7 +32,8 @@ elemental3:
     disk: Disk
   releaseOption:
     nodeImage: '{release} ({version})'
-    image: '{name} (image, no release information)'
+    annotatedImage: '{release} ({version}) · image {name}'
+    image: '{name} (not verified: the image does not say what it contains)'
   prerequisites:
     title: 'Creating this cluster will probably be refused:'
     missing: '{what} is not installed on the management cluster, or you are not allowed to create {kind} objects.'
@@ -40,7 +41,7 @@ elemental3:
     caprke2: The RKE2 provider for Cluster API
     caphv: The Harvester provider for Cluster API
     noHarvester: 'No Harvester cluster is imported in Virtualization Management, or you have no access to one.'
-    noOperator: 'The Elemental image build operator is not installed, so no releases are listed. Select an Elemental 3 node image that is already in Harvester and enter its Kubernetes version.'
+    noOperator: 'The Elemental image build operator is not installed. Releases are listed from the node images in Harvester that carry release annotations; other images are listed as not verified.'
     harvesterError: 'Could not read from Harvester cluster {cluster}: {error}'
   validation:
     required: '{field} is required.'
@@ -57,6 +58,188 @@ elemental3:
     failed: 'Creating {kind} "{name}" failed: {error}'
     rolledBack: 'The objects created before the failure were deleted again.'
     rollbackFailed: 'Could not delete {kind} "{name}" again: {error}'
+  nav: Elemental 3 Clusters
+  state:
+    ready: Ready
+    provisioning: Provisioning
+    error: Error
+    deleting: Deleting
+  endpoint:
+    loadBalancer: 'Control plane address: assigned by Harvester. Your Harvester account may create load balancers, so the Harvester provider for Cluster API creates one for the control plane and uses its address (DHCP). No address is entered here; the cluster page shows it once it is assigned.'
+    address: 'Control plane address: the address entered above, announced by kube-vip. Your Harvester account may not create load balancers or read the Harvester system namespace, which the Harvester provider for Cluster API (v0.10.1) needs to report the infrastructure as ready. Until the provider handles that, an administrator has to mark the HarvesterCluster as ready; the cluster page shows where it waits.'
+    uncertain: 'Could not ask Harvester whether your account may create load balancers. The address entered above is used with kube-vip. If your account does have that right, the Harvester provider replaces the address with a load balancer address after creation; the cluster page shows the address in use.'
+  list:
+    description: 'Cluster API clusters with Elemental 3 nodes on this management cluster. A cluster appears here as soon as it is created, before Rancher has imported it.'
+    create: Create
+    state: State
+    release: Elemental release
+    rancher: Rancher cluster
+    notVisible: not imported, or not visible to you
+    created: Created
+    empty: No Elemental 3 clusters that you can read.
+    scope: 'You are not allowed to {right} in all namespaces. Listing the {count} namespaces you can see one by one.'
+  rights:
+    title: 'Parts of this page are empty or disabled because your account lacks these rights on the management cluster:'
+    missing: 'Not available to your account. Missing right: {right}.'
+  detail:
+    endpoint: Control plane address
+    endpointPending: not assigned yet
+    refreshed: 'refreshed {time}'
+    explore: Explore in Rancher
+    delete: Delete
+    deleteConfirm: 'Delete cluster {name} and its machines?'
+    deleteFailed: 'Deleting the cluster failed: {error}'
+    deleting: 'The cluster is being deleted. Cluster API removes the machines; this page goes empty when it is gone.'
+    notFound: 'There is no cluster {name} in namespace {namespace}, or it was deleted.'
+  progress:
+    title: Provisioning
+    provisioned: 'Provisioned: every step this page can read is done.'
+    note: 'This page only shows what the objects on the management cluster report (refreshed every 10 seconds). The work is done by Cluster API, the RKE2 and Harvester providers, and Rancher Turtles.'
+    waitingFor:
+      written: Waiting for the cluster object
+      infrastructure: Waiting for the Harvester provider to prepare the infrastructure
+      controlPlane: Waiting for the control plane machines
+      workers: Waiting for the worker machines
+      rancher: Waiting for Rancher to import the cluster
+    phase:
+      written: Objects created
+      infrastructure: Infrastructure
+      controlPlane: Control plane machines
+      workers: Worker machines
+      rancher: Imported into Rancher
+    state:
+      done: Done
+      active: In progress
+      waiting: Waiting
+      error: Error
+      unknown: Unknown
+      skipped: Skipped
+    detail:
+      written: 'Cluster API objects written {created}'
+      notFound: 'The Cluster object does not exist'
+      infrastructureDone: 'Harvester infrastructure ready, control plane address {endpoint}'
+      infrastructureWaiting: 'The Harvester provider has not reported the infrastructure as ready'
+      controlPlaneWaiting: 'No control plane machine has joined yet ({ready} of {desired} ready)'
+      controlPlaneScaling: '{ready} of {desired} control plane machines ready'
+      controlPlaneDone: '{ready} of {desired} control plane machines ready'
+      workersNone: 'No worker machines requested'
+      workersWaiting: '{ready} of {desired} worker machines ready'
+      workersDone: '{ready} of {desired} worker machines ready'
+      rancherDone: 'Rancher cluster {id} is ready'
+      rancherWaiting: 'Rancher cluster {id} exists and is not ready yet'
+      rancherNotVisible: 'No Rancher cluster for this cluster is visible to you. Rancher Turtles imports the cluster once the control plane is up; the imported cluster belongs to Rancher, and you see it only as a member.'
+  pools:
+    title: Machine Pools
+    pool: Pool
+    role: Role
+    roles:
+      controlPlane: Control plane
+      worker: Worker
+    machines: Machines
+    readyOf: '{ready} of {desired} ready'
+    size: Machine size
+    scale: Machine count
+    cannotScale: 'Your account may not change the machine count.'
+    scaleDownConfirm: 'Remove one machine from {name}? Cluster API deletes the machine and its disk.'
+    remove: Remove
+    scaleFailed: 'Changing the machine count of {name} failed: {error}'
+  machines:
+    title: Machines
+    name: Machine
+    phase: Phase
+    node: Node
+    message: Waiting for
+    none: No machines yet.
+  conditions:
+    title: Conditions
+    object: Object
+    type: Condition
+    status: Status
+    reason: Reason
+    message: Message
+    since: Since
+  events:
+    title: Events
+    time: Time
+    type: Type
+    reason: Reason
+    object: Object
+    message: Message
+    none: No events for this cluster in the last hour.
+    note: 'Events of the objects of this cluster in its namespace on the management cluster. Kubernetes keeps events for about one hour.'
+  nodes:
+    name: Node
+    roles: Roles
+    state: State
+    ready: Ready
+    notReady: Not ready
+    cordoned: cordoned
+    kubelet: Kubernetes
+    os: OS image
+    kernel: Kernel
+  release:
+    title: Elemental Release
+    current: Current release
+    unknown: unknown
+    oneVersion: 'One version for the OS, Kubernetes (RKE2) and the applications of the release.'
+    fromCreate: 'as created; the Lifecycle Manager has not applied a release yet'
+    target: Upgrade to
+    targetPlaceholder: 'Select a release, or type a version'
+    targetInvalid: 'Type a version such as 1.37.2-20.3. When the registry of the current release is not known, type the whole manifest reference: registry/path/manifest:version.'
+    option: '{version} ({source})'
+    source:
+      nodeImage: node image built
+      image: node image in Harvester
+      cluster: used by another cluster
+    notOffered: '{version} is not offered: {why}'
+    blocked:
+      notNewer: not newer than the current release
+      notComparable: its version cannot be compared with the current one
+      otherLineage: it belongs to another product line than the current release
+    upgrade: Upgrade
+    upgradeFailed: 'The Release was not accepted: {error}'
+    notVisible: 'The release of this cluster cannot be read or changed by your account: the Release object lives in the workload cluster and is reached through Rancher, and no imported Rancher cluster for this cluster is visible to you. Missing: membership of the imported Rancher cluster with get, list, create and patch on releases.lifecycle.suse.com.'
+    notReady: 'The release can be read once Rancher has imported the cluster and it is ready.'
+    noLifecycleManager: 'The cluster has no Release API: the Elemental Lifecycle Manager is not installed in it.'
+    progressTitle: 'Release {version}'
+    state:
+      none: No release
+      pending: Accepted, not started
+      inProgress: Upgrading
+      failed: Failed
+      applied: Applied
+    phase:
+      ManifestResolved: Release manifest
+      LCMUpgraded: Lifecycle Manager
+      PriorityHelmChartsUpgraded: Applications needed first
+      OSUpgraded: Operating system
+      KubernetesUpgraded: Kubernetes (RKE2)
+      HelmChartsUpgraded: Applications
+    rollbackNote: 'Going back to an earlier release is not offered: the Lifecycle Manager refuses a lower version. A failed OS update is rolled back on the node by its snapshot; the Release API does not report snapshots, so this page cannot show them.'
+    unverifiedImage: 'Nothing says which Elemental release or Kubernetes version this image contains (it has no release annotations and was not delivered by the image build operator). It may not be an Elemental 3 node image at all. If the version entered here is not the one in the image, the cluster will not come up or will report a wrong version.'
+  preflight:
+    title: 'Checks before upgrading to {version}'
+    note: 'One Release object is written for {manifest}. The Lifecycle Manager in the cluster then upgrades the OS, Kubernetes and the applications, node by node.'
+    nodesReady:
+      ok: 'All {count} nodes are Ready'
+      failed: 'Nodes not Ready: {nodes}'
+      unknown: 'Node state could not be read'
+    noneCordoned:
+      ok: 'No node is cordoned'
+      failed: 'Cordoned nodes: {nodes}'
+      unknown: 'Node state could not be read'
+    noUpgradeRunning:
+      ok: 'No other upgrade is running'
+      failed: 'An upgrade to {version} is still running'
+      unknown: 'Upgrade state could not be read'
+    newer:
+      ok: '{target} is newer than the current release {current}'
+      failed: '{target} is not newer than the current release {current}'
+      unknown: '{target} could not be compared with the current release'
+    accepted:
+      ok: 'The Lifecycle Manager accepts this release (server-side dry run)'
+      failed: 'The cluster refuses this release: {error}'
+      unknown: 'Asking the cluster whether it accepts this release…'
 cluster:
   provider:
     elemental3-harvester: Elemental 3 on Harvester

@@ -1,5 +1,5 @@
 import {
-  errorText, imageOptions, keyPairOptions, namespaceOptions, networkOptions, nodeImageOptions, releaseName
+  IMAGE_KUBERNETES_ANNOTATION, IMAGE_RELEASE_ANNOTATION, endpointAccessReviews, endpointModeFor, errorText, imageOptions, keyPairOptions, namespaceOptions, networkOptions, nodeImageOptions, releaseName
 } from '../harvester';
 
 const ready = { conditions: [{ type: 'Ready', status: 'True' }] };
@@ -48,12 +48,83 @@ describe('imageOptions', () => {
     ];
 
     expect(imageOptions(images)).toStrictEqual([{
-      name:  'tenant/node.qcow2',
-      label: 'tenant/node.qcow2',
-      value: {
-        image: 'tenant/img-1', kubernetesVersion: '', releaseManifest: '', fromOperator: false
+      name:    'tenant/node.qcow2',
+      release: '',
+      label:   'tenant/node.qcow2',
+      value:   {
+        image: 'tenant/img-1', kubernetesVersion: '', releaseManifest: '', fromOperator: false, verified: false
       },
     }]);
+  });
+
+  const imported = { conditions: [{ type: 'Imported', status: 'True' }] };
+  const image = (name: string, annotations: any) => ({
+    id:       `tenant/${ name }`,
+    metadata: {
+      namespace: 'tenant', name, annotations
+    },
+    spec:   { displayName: `${ name }.qcow2` },
+    status: imported
+  });
+
+  it('takes release and Kubernetes version from the annotations of the image, so nothing is typed', () => {
+    const out = imageOptions([image('e3-1371', {
+      [IMAGE_RELEASE_ANNOTATION]:    'registry.example/uc/rke2-manifest:1.37.1-17.1',
+      [IMAGE_KUBERNETES_ANNOTATION]: 'v1.37.1+rke2r1',
+    })]);
+
+    expect(out[0].release).toBe('rke2-manifest:1.37.1-17.1');
+    expect(out[0].value).toStrictEqual({
+      image: 'tenant/e3-1371', kubernetesVersion: 'v1.37.1+rke2r1', releaseManifest: 'registry.example/uc/rke2-manifest:1.37.1-17.1', fromOperator: false, verified: true
+    });
+  });
+
+  it.each([
+    ['no annotations', undefined],
+    ['the release only', { [IMAGE_RELEASE_ANNOTATION]: 'registry.example/uc/rke2-manifest:1.37.1-17.1' }],
+    ['the version only', { [IMAGE_KUBERNETES_ANNOTATION]: 'v1.37.1+rke2r1' }],
+    ['a version that is not an RKE2 version', { [IMAGE_RELEASE_ANNOTATION]: 'registry.example/uc/rke2-manifest:1.37.1-17.1', [IMAGE_KUBERNETES_ANNOTATION]: '1.37' }],
+  ])('lists an image with %s as not verified and takes nothing from it', (_what, annotations) => {
+    const out = imageOptions([image('some', annotations)]);
+
+    expect(out[0].value.verified).toBe(false);
+    expect(out[0].value.kubernetesVersion).toBe('');
+    expect(out[0].value.releaseManifest).toBe('');
+  });
+
+  it('lists described images before images nobody vouches for', () => {
+    const out = imageOptions([
+      image('a-unknown', {}),
+      image('z-described', { [IMAGE_RELEASE_ANNOTATION]: 'r.example/rke2-manifest:1.37.2-20.3', [IMAGE_KUBERNETES_ANNOTATION]: 'v1.37.2+rke2r1' }),
+    ]);
+
+    expect(out.map((o) => o.value.image)).toStrictEqual(['tenant/z-described', 'tenant/a-unknown']);
+  });
+});
+
+describe('control plane endpoint mode', () => {
+  it('asks Harvester the two things the Harvester provider does before it reports ready', () => {
+    const reviews = endpointAccessReviews('tenant');
+
+    expect(reviews.map((r) => r.spec.resourceAttributes)).toStrictEqual([
+      {
+        group: 'apps', resource: 'deployments', verb: 'get', namespace: 'harvester-system', name: 'harvester'
+      },
+      {
+        group: 'loadbalancer.harvesterhci.io', resource: 'loadbalancers', verb: 'create', namespace: 'tenant'
+      },
+    ]);
+  });
+
+  it('uses the load balancer only when the user may do both', () => {
+    expect(endpointModeFor([true, true])).toStrictEqual({ mode: 'loadBalancer', certain: true });
+    expect(endpointModeFor([false, true])).toStrictEqual({ mode: 'address', certain: true });
+    expect(endpointModeFor([true, false])).toStrictEqual({ mode: 'address', certain: true });
+  });
+
+  it('falls back to the address and says it is not certain when Harvester did not answer', () => {
+    expect(endpointModeFor([null, true])).toStrictEqual({ mode: 'address', certain: false });
+    expect(endpointModeFor([])).toStrictEqual({ mode: 'address', certain: false });
   });
 });
 
@@ -76,7 +147,7 @@ describe('nodeImageOptions', () => {
       release: 'rke2-manifest:1.37.2-20.3',
       label:   'rke2-manifest:1.37.2-20.3',
       value:   {
-        image: 'tenant/img-abc', kubernetesVersion: 'v1.37.2+rke2r1', releaseManifest: 'registry.example/uc/rke2-manifest:1.37.2-20.3', fromOperator: true
+        image: 'tenant/img-abc', kubernetesVersion: 'v1.37.2+rke2r1', releaseManifest: 'registry.example/uc/rke2-manifest:1.37.2-20.3', fromOperator: true, verified: true
       },
     }]);
   });

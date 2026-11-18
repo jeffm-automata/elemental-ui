@@ -1,5 +1,5 @@
 import {
-  API, IMPORT_LABEL, buildObjects, collectionPath, defaultValues, isIPv4, names, validate, WizardValues
+  API, IMPORT_LABEL, READ_API, accessReview, buildObjects, collectionPath, defaultValues, isIPv4, names, objectPath, rightText, validate, WizardValues
 } from '../objects';
 
 function values(over: Partial<WizardValues> = {}): WizardValues {
@@ -195,6 +195,49 @@ describe('buildObjects', () => {
     });
   });
 
+  describe('with a Harvester load balancer as control plane endpoint', () => {
+    const lbObjects = buildObjects(values({ endpointMode: 'loadBalancer', controlPlaneHost: '' }), { kubeconfig: 'KUBECONFIG', clusterUid: 'uid-1' });
+    const lb = (key: string) => lbObjects.find((o) => o.key === key)!.object;
+
+    it('needs no address', () => {
+      expect(validate(values({ endpointMode: 'loadBalancer', controlPlaneHost: '' }))).toStrictEqual([]);
+      expect(validate(values({ endpointMode: 'address', controlPlaneHost: '' })).map((e) => e.field)).toStrictEqual(['controlPlaneHost']);
+    });
+
+    it('writes no endpoint and no kube-vip: the provider assigns the only address there is', () => {
+      expect(lb('infraCluster').spec.controlPlaneEndpoint).toBeUndefined();
+      expect(lb('controlPlane').spec.files.map((f: any) => f.path)).toStrictEqual(['/opt/elemental-capi/node-address.sh']);
+      expect(JSON.stringify(lbObjects)).not.toContain('kube-vip');
+    });
+
+    it('asks for the RKE2 registration port on the load balancer, next to the API port the provider adds', () => {
+      expect(lb('infraCluster').spec.loadBalancerConfig).toStrictEqual({
+        ipamType:  'dhcp',
+        listeners: [{
+          name: 'rke2-server', port: 9345, protocol: 'TCP', backendPort: 9345
+        }],
+      });
+    });
+
+    it('writes the same eight objects otherwise', () => {
+      expect(lbObjects.map((o) => o.key)).toStrictEqual(objects.map((o) => o.key));
+      expect(lb('workers').spec.template.spec.version).toBe(byKey('workers').spec.template.spec.version);
+    });
+  });
+
+  it('writes the typed address in exactly two places, both from the one field: endpoint and kube-vip', () => {
+    const text = JSON.stringify(objects);
+
+    expect(text.split('192.0.2.10').length - 1).toBe(2);
+    expect(byKey('infraCluster').spec.controlPlaneEndpoint.host).toBe('192.0.2.10');
+  });
+
+  it('records the Harvester cluster when it is known', () => {
+    const o = buildObjects(values({ harvesterClusterId: 'c-abcde' }), { kubeconfig: 'x' });
+
+    expect(o[0].object.metadata.annotations).toStrictEqual({ 'elemental.suse.com/harvester-cluster': 'c-abcde' });
+  });
+
   it('announces the control plane address with kube-vip on control plane machines only', () => {
     const cpFiles = byKey('controlPlane').spec.files;
     const workerFiles = byKey('workerBootstrap').spec.template.spec.files;
@@ -231,6 +274,21 @@ describe('buildObjects', () => {
 
   it('contains no status and nothing a controller owns', () => {
     objects.forEach((o) => expect(o.object.status).toBeUndefined());
+  });
+});
+
+describe('access reviews and paths', () => {
+  it('builds the review the page sends before it offers a control', () => {
+    expect(accessReview(API.md, 'patch', 'ns1').spec.resourceAttributes).toStrictEqual({
+      group: 'cluster.x-k8s.io', resource: 'machinedeployments', verb: 'patch', namespace: 'ns1'
+    });
+    expect(accessReview(API.cluster, 'delete', 'ns1', 'demo').spec.resourceAttributes.name).toBe('demo');
+  });
+
+  it('names a right the way it has to be granted', () => {
+    expect(rightText(API.md, 'patch', 'ns1')).toBe('patch machinedeployments.cluster.x-k8s.io in namespace ns1');
+    expect(rightText(READ_API.event, 'list', 'ns1')).toBe('list events in namespace ns1');
+    expect(objectPath(API.md, 'ns1', 'demo-md-0')).toBe('/apis/cluster.x-k8s.io/v1beta2/namespaces/ns1/machinedeployments/demo-md-0');
   });
 });
 

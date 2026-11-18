@@ -39,10 +39,51 @@ export interface ReleaseValue {
   releaseManifest: string;
   /** True when the image build operator delivered the image and says what it contains */
   fromOperator: boolean;
+  /** True when the release and Kubernetes version are stated by the operator or by the image's annotations */
+  verified: boolean;
 }
 
 export function harvesterBase(clusterId: string): string {
   return `/k8s/clusters/${ clusterId }/v1`;
+}
+
+/**
+ * What the Harvester provider (CAPHV) does with its Harvester identity before it reports the
+ * infrastructure as ready: it reads the Harvester deployment and creates a LoadBalancer in the VM
+ * namespace, whose address then REPLACES spec.controlPlaneEndpoint of the HarvesterCluster.
+ * The form asks Harvester whether the logged-in user may do both (SelfSubjectAccessReview) and
+ * writes objects for the path CAPHV will actually take.
+ */
+export function endpointAccessReviews(vmNamespace: string): { key: string; spec: any }[] {
+  return [
+    {
+      key:  'harvesterDeployment',
+      spec: {
+        resourceAttributes: {
+          group: 'apps', resource: 'deployments', verb: 'get', namespace: 'harvester-system', name: 'harvester'
+        }
+      },
+    },
+    {
+      key:  'loadBalancer',
+      spec: {
+        resourceAttributes: {
+          group: 'loadbalancer.harvesterhci.io', resource: 'loadbalancers', verb: 'create', namespace: vmNamespace
+        }
+      },
+    },
+  ];
+}
+
+export type EndpointMode = 'loadBalancer' | 'address';
+
+/** allowed: one boolean per review of endpointAccessReviews, null when the review itself failed. */
+export function endpointModeFor(allowed: (boolean | null)[]): { mode: EndpointMode; certain: boolean } {
+  if (allowed.length && allowed.every((a) => a === true)) {
+    return { mode: 'loadBalancer', certain: true };
+  }
+
+  return { mode: 'address', certain: allowed.length > 0 && allowed.every((a) => a !== null) };
 }
 
 function byLabel<T>(a: Option<T>, b: Option<T>): number {
@@ -79,23 +120,44 @@ function conditionTrue(r: any, type: string): boolean {
   return (r?.status?.conditions || []).some((c: any) => c.type === type && c.status === 'True');
 }
 
-/** Disk images in Harvester that finished importing. Installer ISOs are left out. */
-export function imageOptions(images: any[]): (Option<ReleaseValue> & { name: string })[] {
+/** Annotations on a Harvester image that say which Elemental release it was built from. Set by whoever imports the image. */
+export const IMAGE_RELEASE_ANNOTATION = 'elemental.suse.com/release-manifest';
+export const IMAGE_KUBERNETES_ANNOTATION = 'elemental.suse.com/kubernetes-version';
+
+const IMAGE_VERSION_RE = /^v\d+\.\d+\.\d+\+rke2r\d+$/;
+
+/**
+ * Disk images in Harvester that finished importing. Installer ISOs are left out.
+ *
+ * An image that carries both release annotations is offered as a release and its Kubernetes version is
+ * taken from the annotation. An image without them is still listed, marked as not verified: nothing in
+ * Harvester says what such an image contains.
+ */
+export function imageOptions(images: any[]): (Option<ReleaseValue> & { name: string; release: string })[] {
   return (images || [])
     .filter((i) => conditionTrue(i, 'Imported'))
     .filter((i) => !`${ i.spec?.displayName || '' }`.toLowerCase().endsWith('.iso'))
     .map((i) => {
       const name = `${ i.metadata?.namespace }/${ i.spec?.displayName || i.metadata?.name }`;
+      const annotations = i.metadata?.annotations || {};
+      const manifest = `${ annotations[IMAGE_RELEASE_ANNOTATION] || '' }`.trim();
+      const version = `${ annotations[IMAGE_KUBERNETES_ANNOTATION] || '' }`.trim();
+      const described = !!manifest && IMAGE_VERSION_RE.test(version);
 
       return {
         name,
-        label: name,
-        value: {
-          image: nsName(i), kubernetesVersion: '', releaseManifest: '', fromOperator: false
+        release: described ? releaseName(manifest) : '',
+        label:   name,
+        value:   {
+          image:             nsName(i),
+          kubernetesVersion: described ? version : '',
+          releaseManifest:   described ? manifest : '',
+          fromOperator:      false,
+          verified:          described,
         },
       };
     })
-    .sort(byLabel);
+    .sort((a, b) => (a.value.verified === b.value.verified ? byLabel(a, b) : (a.value.verified ? -1 : 1)));
 }
 
 /** Short name of a release manifest reference: registry/path/rke2-manifest:1.37.2-20.3 -> rke2-manifest:1.37.2-20.3 */
@@ -121,7 +183,7 @@ export function nodeImageOptions(nodeImages: any[], vmNamespace: string): (Optio
         release,
         label: release,
         value: {
-          image, kubernetesVersion: n.status.image.kubernetesVersion, releaseManifest: n.spec?.release?.manifest || '', fromOperator: true
+          image, kubernetesVersion: n.status.image.kubernetesVersion, releaseManifest: n.spec?.release?.manifest || '', fromOperator: true, verified: true
         },
       };
     })
