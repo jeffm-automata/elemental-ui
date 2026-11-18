@@ -156,7 +156,7 @@ function ageSeconds(c: Condition, now: number): number | null {
  * is an error: its age is unknown.
  * `progress`: not true yet, and nothing says it will not become true.
  */
-export function severity(c: Condition, now: number = Date.now(), grace: number = FAILURE_GRACE_SECONDS): Severity {
+export function severity(c: Condition, now: number = Date.now(), grace: number = FAILURE_GRACE_SECONDS, notYetTimeout: number = NOT_YET_TIMEOUT_SECONDS): Severity {
   if (!c || NEGATIVE_POLARITY.includes(c.type) || c.status === 'True') {
     return 'ok';
   }
@@ -168,7 +168,7 @@ export function severity(c: Condition, now: number = Date.now(), grace: number =
     return 'error';
   }
   if (NOT_YET_RE.test(message)) {
-    return age !== null && age > NOT_YET_TIMEOUT_SECONDS ? 'error' : 'progress';
+    return age !== null && age > notYetTimeout ? 'error' : 'progress';
   }
   if (FAILURE_RE.test(reason) || FAILURE_RE.test(message)) {
     return age === null || age > grace ? 'error' : 'progress';
@@ -189,8 +189,8 @@ export function stalledMinutes(c: Condition, now: number = Date.now()): number {
 }
 
 /** True when a condition reports a failure, as opposed to "not yet" or a failure too young to count. */
-export function isFailure(c: Condition, now: number = Date.now(), grace: number = FAILURE_GRACE_SECONDS): boolean {
-  return severity(c, now, grace) === 'error';
+export function isFailure(c: Condition, now: number = Date.now(), grace: number = FAILURE_GRACE_SECONDS, notYetTimeout: number = NOT_YET_TIMEOUT_SECONDS): boolean {
+  return severity(c, now, grace, notYetTimeout) === 'error';
 }
 
 function num(n: any): number {
@@ -359,7 +359,11 @@ export function problems(o: ClusterObjects, now: number = Date.now()): Problem[]
   };
   // An object of a part that is still coming up gets the boot timeout; one of a part that is up, the short grace
   const graceFor = (c: ConditionRow) => (blocking(c.kind, c.name) ? NOT_YET_TIMEOUT_SECONDS : FAILURE_GRACE_SECONDS);
-  const out: Problem[] = conditionRows(o).filter((c) => isFailure(c, now, graceFor(c))).map((c) => ({
+  // "Not yet" turns into an error by its age only where the user is still waiting for that part. A ready
+  // cluster can carry such a condition for ever (seen: the Harvester provider's FleetIntegrationReady,
+  // "Waiting for Turtles to create provisioning cluster", on a cluster Turtles imported long ago)
+  const notYetFor = (c: ConditionRow) => (blocking(c.kind, c.name) ? NOT_YET_TIMEOUT_SECONDS : Infinity);
+  const out: Problem[] = conditionRows(o).filter((c) => isFailure(c, now, graceFor(c), notYetFor(c))).map((c) => ({
     kind: c.kind, name: c.name, type: c.type, reason: c.reason || '', message: c.message || '', blocking: blocking(c.kind, c.name), stalledMinutes: stalledMinutes(c, now)
   }));
   const failed = (kind: string, obj: any) => {

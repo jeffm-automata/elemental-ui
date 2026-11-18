@@ -214,6 +214,19 @@ describe('severity over time', () => {
     expect(problems(up, NOW).map((p) => p.type)).toStrictEqual(['RemoteConnectionProbe']);
   });
 
+  it('does not raise an old "not yet" of an object whose part of the cluster is ready (seen in the lab: FleetIntegrationReady)', () => {
+    const fleet = at(F('FleetIntegrationReady', 'FleetIntegrationInProgress', 'Waiting for Turtles to create provisioning cluster'), 32 * 60);
+    const up = {
+      cluster:            cluster([], { status: { initialization: { infrastructureProvisioned: true, controlPlaneInitialized: true } } }),
+      infra:              infra([fleet]),
+      controlPlane:       cp(1, 1),
+      machineDeployments: [md(1, 1)],
+    };
+
+    expect(problems(up, NOW)).toStrictEqual([]);
+    expect(clusterState(up, NOW)).toBe('ready');
+  });
+
   it('keeps a cluster "provisioning" while its first worker boots, and "error" only after the timeout', () => {
     const o = (seconds: number) => ({
       cluster:            cluster([], { status: { initialization: { infrastructureProvisioned: true, controlPlaneInitialized: true } } }),
