@@ -111,9 +111,10 @@ const NEGATIVE_POLARITY = ['RollingOut', 'Remediating', 'ScalingDown', 'ScalingU
 /**
  * Providers use reasons like ProbeFailed or InspectionFailed for things that simply have not happened
  * yet ("Remote connection not established yet", "Waiting for Cluster status.infrastructureReady to be
- * true"). Their message says so; such a condition is "not yet", not a failure.
+ * true", "container runtime network not ready: ... cni plugin not initialized" while a node boots).
+ * Their message says so; such a condition is "not yet", not a failure.
  */
-const NOT_YET_RE = /^waiting\b|waiting for|not (yet )?established|not yet|in progress/i;
+const NOT_YET_RE = /^waiting\b|waiting for|not (yet )?established|not yet|in progress|not ready|not initialized/i;
 
 /** True when a condition reports a failure, as opposed to "not yet". */
 export function isFailure(c: Condition): boolean {

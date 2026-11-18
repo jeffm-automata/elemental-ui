@@ -145,6 +145,7 @@ describe('isFailure', () => {
   it('reads the providers\' "not yet" messages as waiting although their reason says failed (seen in the lab)', () => {
     expect(isFailure(F('RemoteConnectionProbe', 'ProbeFailed', 'Remote connection not established yet'))).toBe(false);
     expect(isFailure(F('EtcdClusterHealthy', 'InspectionFailed', 'Waiting for Cluster status.infrastructureReady to be true'))).toBe(false);
+    expect(isFailure(F('NodeHealthy', 'NodeNotReady', '* Node.Ready: container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized'))).toBe(false);
     expect(isFailure(F('HarvesterConnectionReady', 'HarvesterConnectionFailed', 'Harvester deployment not found: deployments.apps "harvester" is forbidden'))).toBe(true);
   });
 
