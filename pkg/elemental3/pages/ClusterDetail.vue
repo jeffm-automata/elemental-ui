@@ -93,10 +93,11 @@ export default {
   mounted() {
     let n = 0;
 
-    // Rights can arrive after the page was opened (the owner's rights follow the import): asked again once a minute
+    // Rights can arrive after the page was opened (the owner's rights follow the import): while one is
+    // missing they are asked again once a minute
     this.timer = setInterval(() => {
       this.load();
-      if (++n % 6 === 0) {
+      if (++n % 6 === 0 && this.rightsIncomplete) {
         this.loadRights();
       }
     }, REFRESH_MS);
@@ -281,6 +282,11 @@ export default {
 
     canUpgrade() {
       return !!this.target && !this.busy && preflightPassed(this.preflightChecks);
+    },
+
+    /** True while a control is disabled for lack of a right: only then are the rights asked again */
+    rightsIncomplete() {
+      return !this.can.scaleWorkers || !this.can.scaleControlPlane || !this.can.deleteCluster;
     },
 
     upgradeRunning() {
