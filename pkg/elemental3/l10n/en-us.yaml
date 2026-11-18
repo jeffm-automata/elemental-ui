@@ -153,6 +153,10 @@ elemental3:
     node: Node
     message: Waiting for
     none: No machines yet.
+    replace: Replace
+    replaceConfirm: 'Delete this machine and its disk? Cluster API drains the node and creates a new machine in its place.'
+    cannotReplace: 'Your account may not delete machines.'
+    replaceFailed: 'Replacing machine {name} failed: {error}'
   conditions:
     title: Conditions
     object: Object
@@ -201,6 +205,7 @@ elemental3:
       otherLineage: it belongs to another product line than the current release
     upgrade: Upgrade
     upgradeFailed: 'The Release was not accepted: {error}'
+    afterImport: 'Upgrades become available here once the machines are up and Rancher has imported the cluster.'
     notVisible: 'The release of this cluster cannot be read or changed by your account: the Release object lives in the workload cluster and is reached through Rancher, and no imported Rancher cluster for this cluster is visible to you. Missing: membership of the imported Rancher cluster with get, list, create and patch on releases.lifecycle.suse.com.'
     notReady: 'The release can be read once Rancher has imported the cluster and it is ready.'
     noLifecycleManager: 'The cluster has no Release API: the Elemental Lifecycle Manager is not installed in it.'

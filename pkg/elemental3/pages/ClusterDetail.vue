@@ -69,7 +69,7 @@ export default {
       // Rights the user lacks, as { key: text } where text is the right as it has to be granted
       denied:             {},
       can:                {
-        scaleWorkers: false, scaleControlPlane: false, deleteCluster: false
+        scaleWorkers: false, scaleControlPlane: false, deleteCluster: false, replaceMachine: false
       },
       // Workload cluster, through Rancher's cluster proxy
       nodes:            null,
@@ -85,6 +85,8 @@ export default {
       confirmDelete:    false,
       // Pool key of the scale-down waiting for confirmation
       confirmScaleDown: '',
+      // Name of the machine whose replacement waits for confirmation
+      confirmReplace:   '',
       timer:            null,
       lastRefresh:      '',
     };
@@ -480,20 +482,23 @@ export default {
       // Asked for the cluster's own objects by name: rights may be granted per object
       const mdName = this.machineDeployments[0]?.metadata?.name;
       const cpName = this.cluster.spec?.controlPlaneRef?.name;
-      const [md, cp, del] = await Promise.all([
+      const workerMachine = (this.machines || []).find((m) => !('cluster.x-k8s.io/control-plane' in (m.metadata?.labels || {})))?.metadata?.name;
+      const [md, cp, del, rm] = await Promise.all([
         mdName ? this.review(MGMT_API, API.md, 'patch', mdName) : Promise.resolve(null),
         this.review(MGMT_API, API.controlPlane, 'patch', cpName),
         this.review(MGMT_API, API.cluster, 'delete', this.name),
+        this.review(MGMT_API, READ_API.machine, 'delete', workerMachine),
       ]);
 
       this.can = {
-        scaleWorkers: md === true, scaleControlPlane: cp === true, deleteCluster: del === true
+        scaleWorkers: md === true, scaleControlPlane: cp === true, deleteCluster: del === true, replaceMachine: rm !== false
       };
       const mark = (key, allowed, api, verb) => (allowed === false ? this.deny(key, api, verb) : this.allow(key));
 
       mark('scaleWorkers', md, API.md, 'patch');
       mark('scaleControlPlane', cp, API.controlPlane, 'patch');
       mark('deleteCluster', del, API.cluster, 'delete');
+      mark('replaceMachine', rm, READ_API.machine, 'delete');
     },
 
     /** Releases the management side knows about: delivered node images, annotated Harvester images, other clusters. */
@@ -557,6 +562,29 @@ export default {
         this.actionError = this.t('elemental3.pools.scaleFailed', { name: pool.name, error: errorText(e) }, true);
         if (httpStatus(e) === 403) {
           this.deny(pool.role === 'worker' ? 'scaleWorkers' : 'scaleControlPlane', api, 'patch');
+        }
+      }
+      this.busy = '';
+    },
+
+    /**
+     * Replace a worker machine: one DELETE of the Machine. Its MachineDeployment still wants the same
+     * count, so Cluster API drains the node, removes the VM and creates a new machine.
+     */
+    async replaceMachine(name) {
+      if (this.busy) {
+        return;
+      }
+      this.confirmReplace = '';
+      this.busy = `replace:${ name }`;
+      this.actionError = '';
+      try {
+        await this.mgmt('delete', objectPath(READ_API.machine, this.namespace, name));
+        await this.load();
+      } catch (e) {
+        this.actionError = this.t('elemental3.machines.replaceFailed', { name, error: errorText(e) }, true);
+        if (httpStatus(e) === 403) {
+          this.deny('replaceMachine', READ_API.machine, 'delete');
         }
       }
       this.busy = '';
@@ -907,8 +935,15 @@ export default {
           </div>
         </div>
 
+        <p
+          v-if="!rancherCluster && !provisioned"
+          class="text-muted"
+          data-testid="elemental3-release-after-import"
+        >
+          {{ t('elemental3.release.afterImport') }}
+        </p>
         <Banner
-          v-if="!rancherCluster"
+          v-else-if="!rancherCluster"
           color="warning"
           data-testid="elemental3-release-not-visible"
           :label="t('elemental3.release.notVisible')"
@@ -1152,6 +1187,7 @@ export default {
                 <th>{{ t('elemental3.machines.phase') }}</th>
                 <th>{{ t('elemental3.machines.node') }}</th>
                 <th>{{ t('elemental3.machines.message') }}</th>
+                <th />
               </tr>
             </thead>
             <tbody>
@@ -1164,9 +1200,46 @@ export default {
                 <td>{{ m.phase }}</td>
                 <td>{{ m.node }}</td>
                 <td>{{ m.message }}</td>
+                <td class="e3-machine-actions">
+                  <template v-if="m.role === 'worker'">
+                    <span
+                      v-if="confirmReplace === m.name"
+                      :data-testid="`elemental3-machine-replace-ask-${ m.name }`"
+                    >
+                      {{ t('elemental3.machines.replaceConfirm') }}
+                      <button
+                        type="button"
+                        class="btn btn-sm bg-error"
+                        :data-testid="`elemental3-machine-replace-confirm-${ m.name }`"
+                        @click="replaceMachine(m.name)"
+                      >
+                        {{ t('elemental3.machines.replace') }}
+                      </button>
+                      <button
+                        type="button"
+                        class="btn btn-sm role-secondary"
+                        @click="confirmReplace = ''"
+                      >
+                        {{ t('generic.cancel') }}
+                      </button>
+                    </span>
+                    <button
+                      v-else
+                      type="button"
+                      class="btn btn-sm role-secondary"
+                      :disabled="!can.replaceMachine || !!busy || m.phase === 'Deleting'"
+                      :title="can.replaceMachine ? '' : t('elemental3.machines.cannotReplace')"
+                      :data-testid="`elemental3-machine-replace-${ m.name }`"
+                      data-replace="worker"
+                      @click="confirmReplace = m.name"
+                    >
+                      {{ t('elemental3.machines.replace') }}
+                    </button>
+                  </template>
+                </td>
               </tr>
               <tr v-if="!machineList.length">
-                <td colspan="5">
+                <td colspan="6">
                   {{ t('elemental3.machines.none') }}
                 </td>
               </tr>
