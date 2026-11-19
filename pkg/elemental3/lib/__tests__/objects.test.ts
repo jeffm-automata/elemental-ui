@@ -1,5 +1,6 @@
 import {
-  API, IMPORT_LABEL, READ_API, accessReview, buildObjects, collectionPath, defaultValues, isIPv4, names, objectPath, rightText, validate, WizardValues
+  API, IMPORT_LABEL, READ_API, accessReview, buildObjects, collectionPath, defaultValues, isIPv4, names, objectPath, rightText, validate, WizardValues,
+  poolTemplatePatch, resizedMachineTemplate, templateSize, validSize
 } from '../objects';
 
 function values(over: Partial<WizardValues> = {}): WizardValues {
@@ -315,5 +316,61 @@ describe('collectionPath', () => {
     expect(collectionPath(API.secret, 'ns')).toBe('/api/v1/namespaces/ns/secrets');
     expect(collectionPath(API.cluster, 'ns')).toBe('/apis/cluster.x-k8s.io/v1beta2/namespaces/ns/clusters');
     expect(collectionPath(API.infraMachine, 'ns')).toBe('/apis/infrastructure.cluster.x-k8s.io/v1beta1/namespaces/ns/harvestermachinetemplates');
+  });
+});
+
+describe('changing the machine size of a worker pool', () => {
+  const current = {
+    apiVersion: 'infrastructure.cluster.x-k8s.io/v1beta1',
+    kind:       'HarvesterMachineTemplate',
+    metadata:   {
+      name: 'c1-md-0', namespace: 'tenant-a', uid: 'u-1', resourceVersion: '77', labels: { 'cluster.x-k8s.io/cluster-name': 'c1' }, ownerReferences: [{ kind: 'Cluster', name: 'c1' }]
+    },
+    spec: {
+      template: {
+        spec: {
+          cpu:        2,
+          memory:     '8Gi',
+          sshUser:    'root',
+          sshKeyPair: 'agents/key',
+          networks:   ['agents/vm'],
+          volumes:    [{
+            volumeType: 'image', imageName: 'agents/img', volumeSize: '40Gi', bootOrder: 1
+          }]
+        }
+      }
+    },
+    status: { x: 1 },
+  };
+
+  it('reads the size of a template and refuses what it cannot edit', () => {
+    expect(templateSize(current)).toEqual({ cpu: 2, memory: 8 });
+    expect(templateSize({ spec: { template: { spec: { cpu: 2, memory: '8192Mi' } } } })).toBeNull();
+    expect(templateSize(null)).toBeNull();
+    expect(validSize({ cpu: 4, memory: 12 })).toBe(true);
+    expect(validSize({ cpu: 0, memory: 12 })).toBe(false);
+    expect(validSize({ cpu: 2, memory: 1.5 })).toBe(false);
+  });
+
+  it('writes a new template: same machine, other size, new name, nothing the server owns', () => {
+    const t = resizedMachineTemplate(current, 'c1-md-0', { cpu: 2, memory: 12 }, 'k3x9');
+
+    expect(t.metadata).toEqual({
+      name: 'c1-md-0-2c12g-k3x9', namespace: 'tenant-a', labels: { 'cluster.x-k8s.io/cluster-name': 'c1' }
+    });
+    expect(t.spec.template.spec).toEqual({ ...current.spec.template.spec, memory: '12Gi' });
+    expect(t.status).toBeUndefined();
+    expect(current.spec.template.spec.memory).toBe('8Gi');
+  });
+
+  it('keeps the name within 63 characters', () => {
+    const t = resizedMachineTemplate(current, 'a'.repeat(60), { cpu: 16, memory: 128 }, 'k3x9zz');
+
+    expect(t.metadata.name).toHaveLength(63);
+    expect(t.metadata.name.endsWith('-16c128g-k3x9zz')).toBe(true);
+  });
+
+  it('points the pool at the new template with a patch of the name only', () => {
+    expect(poolTemplatePatch('c1-md-0-2c12g-k3x9')).toEqual({ spec: { template: { spec: { infrastructureRef: { name: 'c1-md-0-2c12g-k3x9' } } } } });
   });
 });

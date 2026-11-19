@@ -7,7 +7,7 @@ import { Banner } from '@components/Banner';
 import { MANAGEMENT } from '@shell/config/types';
 import {
   API, READ_API, ACCESS_REVIEW_PATH, CLUSTER_NAME_LABEL, HARVESTER_CLUSTER_ANNOTATION, RELEASE_ANNOTATION,
-  accessReview, collectionPath, objectPath, rightText
+  accessReview, collectionPath, objectPath, poolTemplatePatch, resizedMachineTemplate, rightText, templateSize, validSize
 } from '../lib/objects';
 import {
   clusterEvents, clusterState, conditionRows, currentPhase, isProvisioned, machineRows, poolRows, problems, progressPhases
@@ -69,8 +69,11 @@ export default {
       // Rights the user lacks, as { key: text } where text is the right as it has to be granted
       denied:             {},
       can:                {
-        scaleWorkers: false, scaleControlPlane: false, deleteCluster: false, replaceMachine: false
+        scaleWorkers: false, scaleControlPlane: false, deleteCluster: false, replaceMachine: false, resizeWorkers: false
       },
+      // Pool key whose machine size is being edited, and the values in the form
+      resizing:       '',
+      resizeTo:       { cpu: 0, memory: 0 },
       // Workload cluster, through Rancher's cluster proxy
       nodes:          null,
       release:        null,
@@ -207,6 +210,7 @@ export default {
           cpu:      t.cpu || '',
           memory:   t.memory || '',
           disk:     t.volumes?.[0]?.volumeSize || '',
+          size:     templateSize(this.templates[p.templateName]),
           canScale: p.role === 'worker' ? this.can.scaleWorkers : this.can.scaleControlPlane,
         };
       });
@@ -560,15 +564,16 @@ export default {
       const mdName = this.machineDeployments[0]?.metadata?.name;
       const cpName = this.cluster.spec?.controlPlaneRef?.name;
       const workerMachine = (this.machines || []).find((m) => !('cluster.x-k8s.io/control-plane' in (m.metadata?.labels || {})))?.metadata?.name;
-      const [md, cp, del, rm] = await Promise.all([
+      const [md, cp, del, rm, tpl] = await Promise.all([
         mdName ? this.review(MGMT_API, API.md, 'patch', mdName) : Promise.resolve(null),
         this.review(MGMT_API, API.controlPlane, 'patch', cpName),
         this.review(MGMT_API, API.cluster, 'delete', this.name),
         this.review(MGMT_API, READ_API.machine, 'delete', workerMachine),
+        this.review(MGMT_API, API.infraMachine, 'create'),
       ]);
 
       this.can = {
-        scaleWorkers: md === true, scaleControlPlane: cp === true, deleteCluster: del === true, replaceMachine: rm !== false
+        scaleWorkers: md === true, scaleControlPlane: cp === true, deleteCluster: del === true, replaceMachine: rm !== false, resizeWorkers: md === true && tpl === true
       };
       const mark = (key, allowed, api, verb) => (allowed === false ? this.deny(key, api, verb) : this.allow(key));
 
@@ -663,6 +668,42 @@ export default {
         if (httpStatus(e) === 403) {
           this.deny('replaceMachine', READ_API.machine, 'delete');
         }
+      }
+      this.busy = '';
+    },
+
+    openResize(pool) {
+      this.resizing = pool.key;
+      this.resizeTo = { ...pool.size };
+    },
+
+    resizeChanged(pool) {
+      const to = { cpu: Number(this.resizeTo.cpu), memory: Number(this.resizeTo.memory) };
+
+      return validSize(to) && (to.cpu !== pool.size.cpu || to.memory !== pool.size.memory);
+    },
+
+    /**
+     * Another machine size for a worker pool: one new machine template (the current one with the new
+     * size) and one patch that points the pool at it. Cluster API then replaces the pool's machines one
+     * by one: a new machine first, then the old one is drained and deleted.
+     */
+    async resizePool(pool) {
+      if (this.busy || !this.resizeChanged(pool)) {
+        return;
+      }
+      const to = { cpu: Number(this.resizeTo.cpu), memory: Number(this.resizeTo.memory) };
+      const template = resizedMachineTemplate(this.templates[pool.templateName], pool.name, to, Date.now().toString(36));
+
+      this.busy = `resize:${ pool.key }`;
+      this.actionError = '';
+      try {
+        await this.mgmt('post', collectionPath(API.infraMachine, this.namespace), template);
+        await this.mgmt('patch', objectPath(API.md, this.namespace, pool.name), poolTemplatePatch(template.metadata.name), 'application/merge-patch+json');
+        this.resizing = '';
+        await this.load();
+      } catch (e) {
+        this.actionError = this.t('elemental3.pools.resizeFailed', { name: pool.name, error: errorText(e) }, true);
       }
       this.busy = '';
     },
@@ -1241,9 +1282,63 @@ export default {
                 <td :data-testid="`elemental3-pool-${ p.role }-count`">
                   {{ t('elemental3.pools.readyOf', { ready: p.ready, desired: p.desired }) }}
                 </td>
-                <td>
+                <td :data-testid="`elemental3-pool-${ p.role }-size`">
                   <template v-if="p.cpu">
                     {{ p.cpu }} CPU · {{ p.memory }} · {{ p.disk }}
+                  </template>
+                  <template v-if="p.role === 'worker' && p.size">
+                    <button
+                      v-if="resizing !== p.key"
+                      type="button"
+                      class="btn btn-sm role-secondary ml-10"
+                      :disabled="!can.resizeWorkers || !!busy || upgradeRunning"
+                      :title="can.resizeWorkers ? (upgradeRunning ? t('elemental3.pools.notDuringUpgrade') : '') : t('elemental3.pools.cannotResize')"
+                      data-testid="elemental3-pool-worker-resize"
+                      @click="openResize(p)"
+                    >
+                      {{ t('elemental3.pools.resize') }}
+                    </button>
+                    <div
+                      v-else
+                      class="e3-resize"
+                      data-testid="elemental3-pool-worker-resize-form"
+                    >
+                      <label>{{ t('elemental3.fields.cpu') }}
+                        <input
+                          v-model="resizeTo.cpu"
+                          type="number"
+                          min="1"
+                          data-testid="elemental3-pool-worker-resize-cpu"
+                        >
+                      </label>
+                      <label>{{ t('elemental3.pools.memoryGi') }}
+                        <input
+                          v-model="resizeTo.memory"
+                          type="number"
+                          min="1"
+                          data-testid="elemental3-pool-worker-resize-memory"
+                        >
+                      </label>
+                      <button
+                        type="button"
+                        class="btn btn-sm bg-error"
+                        :disabled="!resizeChanged(p) || !!busy"
+                        data-testid="elemental3-pool-worker-resize-apply"
+                        @click="resizePool(p)"
+                      >
+                        {{ t('elemental3.pools.resizeApply') }}
+                      </button>
+                      <button
+                        type="button"
+                        class="btn btn-sm role-secondary"
+                        @click="resizing = ''"
+                      >
+                        {{ t('generic.cancel') }}
+                      </button>
+                      <div class="text-muted e3-small">
+                        {{ t('elemental3.pools.resizeNote') }}
+                      </div>
+                    </div>
                   </template>
                 </td>
                 <td :data-testid="`elemental3-pool-${ p.role }-version`">
@@ -1261,7 +1356,7 @@ export default {
                     {{ t('elemental3.versions.declaredOnly', { version: p.version }) }}
                   </template>
                 </td>
-                <td>
+                <td class="e3-nowrap">
                   <button
                     type="button"
                     class="btn btn-sm role-secondary"
@@ -1572,6 +1667,25 @@ export default {
   }
   .e3-small {
     font-size: 12px;
+  }
+  .e3-resize {
+    margin-top: 6px;
+
+    label {
+      margin-right: 10px;
+    }
+    input {
+      width: 70px;
+      display: inline-block;
+      margin-left: 4px;
+      padding: 3px 6px;
+    }
+    .btn {
+      margin-right: 6px;
+    }
+  }
+  .e3-nowrap {
+    white-space: nowrap;
   }
   .e3-desired {
     display: inline-block;

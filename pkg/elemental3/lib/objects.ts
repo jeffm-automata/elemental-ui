@@ -576,3 +576,57 @@ export function rightText(api: ApiRef, verb: string, namespace?: string): string
 
   return namespace ? `${ verb } ${ res } in namespace ${ namespace }` : `${ verb } ${ res }`;
 }
+
+// ---- Change the machine size of a worker pool (J-MANAGE-08, the machine size part) ----
+
+export interface MachineSize {
+  cpu: number;
+  /** GiB */
+  memory: number;
+}
+
+/** CPUs and memory (GiB) of a HarvesterMachineTemplate; null when it does not say them in a form this page can edit. */
+export function templateSize(template: any): MachineSize | null {
+  const t = template?.spec?.template?.spec;
+  const m = /^(\d+)Gi$/.exec(`${ t?.memory || '' }`);
+
+  return t && Number.isInteger(t.cpu) && m ? { cpu: t.cpu, memory: Number(m[1]) } : null;
+}
+
+export function validSize(size: MachineSize): boolean {
+  return Number.isInteger(size.cpu) && size.cpu >= 1 && Number.isInteger(size.memory) && size.memory >= 1;
+}
+
+/**
+ * Machine templates are immutable for Cluster API: a pool gets another size by pointing it at a new
+ * template, which rolls its machines (a new machine first, then the old one is drained and deleted).
+ * Returns the new template: the current one with the size changed, under a new name. Everything the
+ * server owns (uid, resourceVersion, owner references, status) is left out; Cluster API makes the
+ * Cluster the owner of a template as soon as a pool refers to it.
+ * `stamp` makes the name unique (the page passes the time); the name stays within 63 characters.
+ */
+export function resizedMachineTemplate(current: any, poolName: string, size: MachineSize, stamp: string): any {
+  const suffix = `-${ size.cpu }c${ size.memory }g-${ stamp }`;
+  const spec = JSON.parse(JSON.stringify(current?.spec || {}));
+
+  spec.template = spec.template || {};
+  spec.template.spec = {
+    ...(spec.template.spec || {}), cpu: size.cpu, memory: `${ size.memory }Gi`
+  };
+
+  return {
+    apiVersion: current?.apiVersion || `${ API.infraMachine.group }/${ API.infraMachine.version }`,
+    kind:       API.infraMachine.kind,
+    metadata:   {
+      name:      `${ poolName.slice(0, 63 - suffix.length) }${ suffix }`,
+      namespace: current?.metadata?.namespace,
+      labels:    current?.metadata?.labels || {},
+    },
+    spec,
+  };
+}
+
+/** Merge patch that points a MachineDeployment at another machine template. Only the name changes. */
+export function poolTemplatePatch(templateName: string): any {
+  return { spec: { template: { spec: { infrastructureRef: { name: templateName } } } } };
+}

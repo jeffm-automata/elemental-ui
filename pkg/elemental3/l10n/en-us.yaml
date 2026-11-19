@@ -150,6 +150,13 @@ elemental3:
     scaleDownConfirm: 'Remove one machine from {name}? Cluster API deletes the machine and its disk.'
     remove: Remove
     scaleFailed: 'Changing the machine count of {name} failed: {error}'
+    resize: Change size
+    resizeApply: Replace machines with this size
+    memoryGi: Memory (GiB)
+    resizeNote: 'Machines cannot be resized in place. Cluster API replaces the machines of this pool one by one with machines of the new size: a new machine first, then the old one is drained and deleted with its disk.'
+    cannotResize: 'Your account may not create machine templates or change the pool.'
+    notDuringUpgrade: 'Not while an upgrade is running.'
+    resizeFailed: 'Changing the machine size of {name} failed: {error}'
   machines:
     title: Machines
     name: Machine
