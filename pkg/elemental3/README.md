@@ -38,7 +38,8 @@ Elemental release with the upgrade, machine pools, machines, conditions and even
 the rights of the logged-in user and writes only on a click: the replica count of a pool, the deletion of a worker
 `Machine` (Replace), a new `HarvesterMachineTemplate` plus the pool's reference to it (Change size), the cluster's one
 `Release` (lifecycle.suse.com/v1alpha1, in the workload cluster, through Rancher's cluster proxy), and the deletion
-of the `Cluster`.
+of the `Cluster`. While an upgrade runs the state reads "Upgrading"; while a control plane node restarts and
+Rancher cannot reach the cluster, the page says so and keeps showing the last progress it read.
 
 **Versions shown.** Cluster API keeps the Kubernetes version a cluster was created with; an upgrade in place by the
 Lifecycle Manager changes the nodes, not `spec.version`. The header and the pool table therefore show the kubelet
@@ -58,9 +59,10 @@ fails in cordon and drain until Rancher is done. The release panel reads, with t
 
 | Check | Read | Passes when |
 |---|---|---|
+| Lifecycle Manager | the `Release` API of the workload cluster | it answers (the release installs its Lifecycle Manager a few minutes after the first boot) |
 | chart | Rancher setting `system-upgrade-controller-chart-version` (management cluster); `apps.catalog.cattle.io` `cattle-system/system-upgrade-controller` (workload cluster) | the Helm release has the setting's chart version, is `deployed` and carries Rancher's label `catalog.cattle.io/cluster-repo-name` |
 | controller | `Deployment` `cattle-system/system-upgrade-controller` | generation observed, every replica updated and available |
-| plans | `plans.upgrade.cattle.io` in `cattle-system` | no Plan has nodes in `status.applying` and none has `Complete` other than `True` |
+| plans | `plans.upgrade.cattle.io` in `cattle-system`, and the nodes | no Plan has nodes in `status.applying`, none has `Complete` other than `True`, and every node a Plan selects carries `plan.upgrade.cattle.io/<plan>` with the Plan's `latestHash` |
 
 One check failing: "not ready yet", and Upgrade stays disabled. Something unreadable, or the right chart version
 without Rancher's label: a warning, Upgrade stays possible. The rule is in `lib/release.ts` (`upgradeReadiness`).
