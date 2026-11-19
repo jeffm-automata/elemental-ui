@@ -17,6 +17,7 @@ import {
   pickedText, runningByPool, upgradePhases, upgradeReadiness, upgradeState, SUC_CHART_SETTING, SUC_NAME, SUC_NAMESPACE
 } from '../lib/release';
 import { IMAGE_RELEASE_ANNOTATION, NODE_IMAGE_TYPE, errorText, harvesterBase } from '../lib/harvester';
+import { CATALOG_PATH, componentText, currentLineage, knownReleases } from '../lib/catalog';
 import { LIST_ROUTE, BLANK_CLUSTER } from '../product';
 
 const MGMT_API = '/k8s/clusters/local';
@@ -80,6 +81,10 @@ export default {
       releaseError:   '',
       releaseDenied:  '',
       knownReleases:  [],
+      /** Where the picker's list comes from: the release catalog, or what the page knew before it existed */
+      releasesFrom:   'fallback',
+      catalogState:   'absent',
+      staleSources:   [],
       // What says whether Rancher's changes after the import are finished (lib/release.ts, upgradeReadiness)
       readinessFacts: {
         wantedChart: undefined, app: undefined, deployment: undefined, plans: undefined
@@ -281,19 +286,30 @@ export default {
     },
 
     offered() {
-      return offeredReleases(this.knownReleases, this.currentRelease);
+      return offeredReleases(this.knownReleases, this.currentRelease, currentLineage(this.currentRelease, this.knownReleases));
     },
 
     releaseOptions() {
       const here = this.currentRelease?.registry || '';
 
       // The repository is named only when the release comes from another one than the current release
-      return this.offered.filter((o) => !o.blocked).map((o) => ({
-        value: manifestRef(o),
-        label: this.t(o.registry === here || !here ? 'elemental3.release.option' : 'elemental3.release.optionFrom', {
+      return this.offered.filter((o) => !o.blocked).map((o) => {
+        const base = this.t(o.registry === here || !here ? 'elemental3.release.option' : 'elemental3.release.optionFrom', {
           version: o.version, registry: o.registry, source: this.t(`elemental3.release.source.${ o.source }`)
-        }),
-      }));
+        });
+        const parts = [base, componentText(o), o.stale ? this.t('elemental3.release.stale') : ''].filter((x) => !!x);
+
+        return { value: manifestRef(o), label: parts.join(' · ') };
+      });
+    },
+
+    /** One line under the picker that says where its list comes from */
+    releaseListNote() {
+      if (this.releasesFrom === 'catalog') {
+        return this.staleSources.length ? this.t('elemental3.release.catalog.stale', { sources: this.staleSources.join(', ') }) : this.t('elemental3.release.catalog.installed');
+      }
+
+      return this.t(`elemental3.release.catalog.${ this.catalogState }`);
     },
 
     /** Known releases that are not valid targets, with the reason. The current release itself is not listed. */
@@ -303,7 +319,10 @@ export default {
         .filter((o) => !!o.blocked && o.version !== current)
         .map((o) => this.t('elemental3.release.notOffered', { version: o.version, why: this.t(`elemental3.release.blocked.${ o.blocked }`) }));
 
-      return [...new Set(lines)];
+      const unique = [...new Set(lines)];
+
+      // A catalog can hold many old releases: the first five reasons, then a count
+      return unique.length > 6 ? [...unique.slice(0, 5), this.t('elemental3.release.notOfferedMore', { count: unique.length - 5 })] : unique;
     },
 
     /** The picker's value as text: a reference chosen from the list, or what was typed */
@@ -605,8 +624,21 @@ export default {
       mark('replaceMachine', rm, READ_API.machine, 'delete');
     },
 
-    /** Releases the management side knows about: delivered node images, annotated Harvester images, other clusters. */
+    /**
+     * Releases the picker lists: the release catalog of the management cluster when it is installed, readable
+     * and not empty; otherwise what the page knew before it existed (readFallbackReleases).
+     */
     async loadKnownReleases() {
+      const res = await knownReleases(() => this.mgmt('get', CATALOG_PATH), () => this.readFallbackReleases());
+
+      this.knownReleases = res.known;
+      this.releasesFrom = res.from;
+      this.catalogState = res.catalog;
+      this.staleSources = res.staleSources;
+    },
+
+    /** Without a catalog: delivered node images, annotated Harvester images, other clusters. */
+    async readFallbackReleases() {
       const known = [];
       const add = (ref, source) => {
         const r = parseManifestRef(ref);
@@ -642,7 +674,7 @@ export default {
         (clusters?.items || []).forEach((c) => add(c.metadata?.annotations?.[RELEASE_ANNOTATION], 'cluster'));
       } catch (e) {}
 
-      this.knownReleases = known;
+      return known;
     },
 
     // ---- writes ----
@@ -1074,6 +1106,12 @@ export default {
               :placeholder="t('elemental3.release.targetPlaceholder')"
               data-testid="elemental3-release-target"
             />
+            <div
+              class="text-muted e3-small mt-5"
+              data-testid="elemental3-release-list-note"
+            >
+              {{ releaseListNote }}
+            </div>
             <div
               v-if="notOffered.length"
               class="text-muted e3-small mt-5"

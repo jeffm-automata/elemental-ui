@@ -193,7 +193,14 @@ export interface ReleaseOption {
   registry: string;
   version: string;
   /** Where the UI learned about this release */
-  source: 'nodeImage' | 'image' | 'cluster';
+  source: 'catalog' | 'nodeImage' | 'image' | 'cluster';
+  /** Only from the release catalog: the name the release manifest states. A cluster stays within one lineage. */
+  lineage?: string;
+  /** Only from the release catalog: Kubernetes and operating system versions the manifest states */
+  kubernetes?: string;
+  os?: string;
+  /** Only from the release catalog: the entry is the last known one, its source did not answer */
+  stale?: boolean;
 }
 
 export interface OfferedRelease extends ReleaseOption {
@@ -203,11 +210,13 @@ export interface OfferedRelease extends ReleaseOption {
 
 /**
  * Releases a cluster can be upgraded to, out of the releases the management side knows about.
- * A release is offered when it is newer than the current one and comes from the same manifest
- * repository (the same solution lineage). The rest is returned with the reason, so the page can say
- * why it is not offered instead of silently hiding it.
+ * A release is offered when it is newer than the current one and of the same lineage. The lineage is
+ * the name the release manifest states when the release catalog says it for both the current release
+ * (`currentLineage`) and the candidate; otherwise it is the name of the manifest repository. The rest
+ * is returned with the reason, so the page can say why it is not offered instead of silently hiding it.
+ * Same rule as `Reachable` in the catalog controller (internal/catalog/reach.go of the Lifecycle Manager).
  */
-export function offeredReleases(known: ReleaseOption[], current: ReleaseRef | null): OfferedRelease[] {
+export function offeredReleases(known: ReleaseOption[], current: ReleaseRef | null, currentLineage = ''): OfferedRelease[] {
   const seen: string[] = [];
   const out: OfferedRelease[] = [];
 
@@ -229,7 +238,11 @@ export function offeredReleases(known: ReleaseOption[], current: ReleaseRef | nu
         blocked = 'notNewer';
       }
     }
-    if (!blocked && current?.registry && repositoryName(current.registry) !== repositoryName(k.registry)) {
+    if (!blocked && currentLineage && k.lineage) {
+      if (currentLineage !== k.lineage) {
+        blocked = 'otherLineage';
+      }
+    } else if (!blocked && current?.registry && repositoryName(current.registry) !== repositoryName(k.registry)) {
       blocked = 'otherLineage';
     }
     out.push({ ...k, blocked });

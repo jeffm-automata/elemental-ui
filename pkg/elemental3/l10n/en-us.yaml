@@ -210,11 +210,21 @@ elemental3:
     targetInvalid: 'Type a version such as 1.37.2-20.3. When the registry of the current release is not known, type the whole manifest reference: registry/path/manifest:version.'
     option: '{version} ({source})'
     optionFrom: '{version} from {registry} ({source})'
+    stale: 'last known, source not reachable'
+    catalog:
+      installed: 'Releases from the release catalog of the management cluster. A version can also be typed.'
+      stale: 'Releases from the release catalog; the source {sources} does not answer, so its entries are the last known ones. A version can also be typed.'
+      empty: 'The release catalog holds no release yet. Listed instead: releases of node images in Harvester and of other clusters. A version can also be typed.'
+      absent: 'No release catalog is installed on the management cluster. Listed instead: releases of node images in Harvester and of other clusters. A version can also be typed.'
+      denied: 'Your account may not read the release catalog (missing right: list availablereleases.lifecycle.suse.com). Listed instead: releases of node images in Harvester and of other clusters. A version can also be typed.'
+      error: 'The release catalog could not be read. Listed instead: releases of node images in Harvester and of other clusters. A version can also be typed.'
     source:
+      catalog: release catalog
       nodeImage: node image built
       image: node image in Harvester
       cluster: used by another cluster
     notOffered: '{version} is not offered: {why}'
+    notOfferedMore: 'and {count} more releases that are not offered'
     blocked:
       notNewer: not newer than the current release
       notComparable: its version cannot be compared with the current one

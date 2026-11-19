@@ -1,0 +1,123 @@
+/**
+ * The release catalog of the management cluster: AvailableRelease objects (lifecycle.suse.com/v1alpha1,
+ * cluster-scoped) written by the catalog controller of the Lifecycle Manager, one per release found in a
+ * ReleaseSource (an OCI repository of release manifests). The picker reads them first; where the catalog
+ * is not installed, not readable or empty it falls back to what the page knew before (node images of the
+ * build operator, annotated Harvester images, other clusters).
+ */
+import { ReleaseOption, ReleaseRef } from './release';
+
+/** Collection path relative to the Kubernetes API root of the management cluster. */
+export const CATALOG_PATH = '/apis/lifecycle.suse.com/v1alpha1/availablereleases';
+
+/**
+ * installed: the catalog answered with at least one release. empty: it answered with none.
+ * absent: the API does not exist (HTTP 404, the definition is not installed). denied: HTTP 403.
+ * error: anything else.
+ */
+export type CatalogState = 'installed' | 'empty' | 'absent' | 'denied' | 'error';
+
+export interface KnownReleases {
+  known: ReleaseOption[];
+  /** Which list the picker shows */
+  from: 'catalog' | 'fallback';
+  catalog: CatalogState;
+  /** Catalog sources whose entries are the last known ones */
+  staleSources: string[];
+}
+
+function clean(registry: string): string {
+  return `${ registry || '' }`.trim().replace(/^oci:\/\//, '').replace(/\/+$/, '');
+}
+
+/** AvailableRelease objects as picker entries. Objects without a repository or a version are left out. */
+export function catalogOptions(items: any[]): ReleaseOption[] {
+  const out: ReleaseOption[] = [];
+
+  (items || []).forEach((item) => {
+    const spec = item?.spec || {};
+    const registry = clean(spec.registry);
+
+    if (!registry || !spec.version) {
+      return;
+    }
+    out.push({
+      registry,
+      version:    `${ spec.version }`,
+      source:     'catalog',
+      lineage:    spec.lineage || '',
+      kubernetes: spec.kubernetes?.version || '',
+      os:         spec.operatingSystem?.version || '',
+      stale:      item?.status?.stale === true,
+    });
+  });
+
+  return out;
+}
+
+/** Names of the sources that have at least one stale entry. */
+export function staleSources(items: any[]): string[] {
+  const names = (items || []).filter((i) => i?.status?.stale === true).map((i) => `${ i?.spec?.source || '' }`).filter((n) => !!n);
+
+  return [...new Set(names)].sort();
+}
+
+/**
+ * Lineage of the cluster's current release, looked up in the catalog: the entry with the same version,
+ * preferring the one from the same repository. '' when the catalog does not hold the current release.
+ */
+export function currentLineage(current: ReleaseRef | null, known: ReleaseOption[]): string {
+  if (!current?.version) {
+    return '';
+  }
+  const same = (known || []).filter((k) => k.version === current.version && !!k.lineage);
+  const here = same.find((k) => clean(k.registry) === clean(current.registry));
+
+  return (here || same[0])?.lineage || '';
+}
+
+function status(e: any): number {
+  return e?._status || e?.status || e?.response?.status || 0;
+}
+
+/**
+ * What the picker lists. `readCatalog` reads the AvailableRelease collection and rejects with the HTTP
+ * status when it cannot; `readFallback` collects what the page knew before the catalog existed. The
+ * fallback is read only when the catalog has nothing to offer, and a failing catalog never fails the page.
+ */
+export async function knownReleases(readCatalog: () => Promise<any>, readFallback: () => Promise<ReleaseOption[]>): Promise<KnownReleases> {
+  let catalog: CatalogState;
+  let items: any[] = [];
+
+  try {
+    const list = await readCatalog();
+
+    items = list?.items || list?.data || [];
+    catalog = catalogOptions(items).length ? 'installed' : 'empty';
+  } catch (e) {
+    const code = status(e);
+
+    catalog = code === 404 ? 'absent' : (code === 403 || code === 401 ? 'denied' : 'error');
+  }
+
+  if (catalog === 'installed') {
+    return {
+      known: catalogOptions(items), from: 'catalog', catalog, staleSources: staleSources(items)
+    };
+  }
+
+  let known: ReleaseOption[] = [];
+
+  try {
+    known = (await readFallback()) || [];
+  } catch (e) {}
+
+  return {
+    known, from: 'fallback', catalog, staleSources: []
+  };
+}
+
+/** "Kubernetes v1.37.2+rke2r1, OS 16.1-76.43" out of what the catalog states; '' for entries from elsewhere. */
+export function componentText(o: ReleaseOption): string {
+  return [o.kubernetes ? `Kubernetes ${ o.kubernetes }` : '', o.os ? `OS ${ o.os }` : ''].filter((x) => !!x).join(', ');
+}

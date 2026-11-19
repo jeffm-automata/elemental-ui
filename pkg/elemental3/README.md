@@ -46,11 +46,19 @@ Lifecycle Manager changes the nodes, not `spec.version`. The header and the pool
 versions of the nodes (from the workload cluster, else from `Machine.status.nodeInfo`) and say when Cluster API
 declares another one. "Current release" is `Release.status.version`, else the release the cluster was created from.
 
-**Releases offered for an upgrade.** There is no release catalog yet. The picker lists the releases the management
-side already knows: `NodeImage` objects of the image build operator, Harvester images that carry the annotation
-`elemental.suse.com/release-manifest`, and the releases other clusters in the namespace were created from; only
-newer releases of the same manifest repository name are offered, and a release from another registry names it. A
-version, or a whole manifest reference `registry/path/manifest:version`, can always be typed.
+**Releases offered for an upgrade.** The picker reads the release catalog of the management cluster first:
+`AvailableRelease` objects (`lifecycle.suse.com/v1alpha1`, cluster-scoped, written by the catalog controller of the
+Lifecycle Manager from the OCI repositories named by `ReleaseSource` objects). Each entry shows the version, the
+Kubernetes and operating system versions its manifest states, and "last known, source not reachable" when the
+catalog marks it stale. Offered: a higher version of the same lineage (the name the manifest states; the lineage of
+the current release is looked up in the catalog, and where the catalog does not hold it the manifest repository
+name is compared instead). What is not offered is listed with a one-line reason. Needs `list` on
+`availablereleases.lifecycle.suse.com`. Where the catalog is not installed (HTTP 404), not readable (403) or empty,
+the picker lists what it listed before the catalog existed, and says so in one line: `NodeImage` objects of the
+image build operator, Harvester images that carry the annotation `elemental.suse.com/release-manifest`, and the
+releases other clusters in the namespace were created from. A version, or a whole manifest reference
+`registry/path/manifest:version`, can always be typed. The rules are in `lib/catalog.ts` and `lib/release.ts`
+(`offeredReleases`).
 
 **Ready for an upgrade.** Rancher changes an imported cluster for some minutes after it reports it ready: it replaces
 the system upgrade controller the release installed with the chart of its setting
@@ -76,6 +84,7 @@ without Rancher's label: a warning, Upgrade stays possible. The rule is in `lib/
 - `lib/harvester.ts`: Harvester and `NodeImage` data to form choices (no dependencies)
 - `lib/status.ts`: object status to progress phases, problems, pool and machine rows (no dependencies)
 - `lib/release.ts`: the release, upgrade phases, pre-flight, readiness, running versions (no dependencies)
+- `lib/catalog.ts`: the release catalog and the fallback when there is none (no dependencies)
 
 ## Build, lint, test
 
