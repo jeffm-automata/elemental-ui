@@ -610,6 +610,10 @@ export function resizedMachineTemplate(current: any, poolName: string, size: Mac
   const spec = JSON.parse(JSON.stringify(current?.spec || {}));
 
   spec.template = spec.template || {};
+  // The API server returns an empty spec.template.metadata and refuses one in a new object
+  if (spec.template.metadata && !Object.keys(spec.template.metadata).length) {
+    delete spec.template.metadata;
+  }
   spec.template.spec = {
     ...(spec.template.spec || {}), cpu: size.cpu, memory: `${ size.memory }Gi`
   };

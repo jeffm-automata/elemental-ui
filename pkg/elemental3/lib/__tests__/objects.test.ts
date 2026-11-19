@@ -363,6 +363,15 @@ describe('changing the machine size of a worker pool', () => {
     expect(current.spec.template.spec.memory).toBe('8Gi');
   });
 
+  it('leaves out the empty spec.template.metadata the API server returns and refuses in a new object (seen on the lab cluster)', () => {
+    const read = { ...current, spec: { template: { metadata: {}, spec: current.spec.template.spec } } };
+
+    expect(resizedMachineTemplate(read, 'c1-md-0', { cpu: 2, memory: 12 }, 'k3x9').spec.template).not.toHaveProperty('metadata');
+    const labelled = { ...current, spec: { template: { metadata: { labels: { a: 'b' } }, spec: current.spec.template.spec } } };
+
+    expect(resizedMachineTemplate(labelled, 'c1-md-0', { cpu: 2, memory: 12 }, 'k3x9').spec.template.metadata).toEqual({ labels: { a: 'b' } });
+  });
+
   it('keeps the name within 63 characters', () => {
     const t = resizedMachineTemplate(current, 'a'.repeat(60), { cpu: 16, memory: 128 }, 'k3x9zz');
 
