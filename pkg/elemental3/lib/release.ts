@@ -406,6 +406,8 @@ export const SUC_CHART_SETTING = 'system-upgrade-controller-chart-version';
 /** Where Rancher and the Elemental release install the system upgrade controller, and where its Plans live. */
 export const SUC_NAMESPACE = 'cattle-system';
 export const SUC_NAME = 'system-upgrade-controller';
+/** Label Rancher's catalog puts on a Helm release it installed from one of its chart repositories (seen: rancher-charts). */
+export const RANCHER_REPO_LABEL = 'catalog.cattle.io/cluster-repo-name';
 
 export type ReadinessState = 'ready' | 'waiting' | 'unknown';
 
@@ -449,7 +451,11 @@ export interface Readiness {
  * kubectl image may not fit the cluster's Kubernetes: cordon and drain fail) and has the controller
  * replaced under it. Ready therefore means, all read from what the cluster's owner can read:
  *
- *  1. chart:      the Helm release of the controller has the chart version of Rancher's setting and is deployed;
+ *  1. chart:      the Helm release of the controller has the chart version of Rancher's setting, was installed
+ *                 by Rancher from one of its chart repositories (RANCHER_REPO_LABEL) and is deployed. A release
+ *                 with the right version that Rancher did not install (a cluster created from an Elemental
+ *                 release that ships the same chart version) is unknown: whether Rancher still replaces
+ *                 it cannot be read;
  *  2. controller: its Deployment is rolled out (the generation is observed, every replica updated and available);
  *  3. plans:      no Plan in the controller's namespace is being applied to a node, and every Plan that
  *                 has been evaluated is complete (Rancher's node agent Plan is the one that matters).
@@ -477,15 +483,19 @@ export function upgradeReadiness(f: ReadinessFacts): Readiness {
       key: 'chart', passed: false, code: 'missing', params: { have, want }
     });
   } else {
-    const ok = have === want && state === 'deployed';
+    const repo = f.app.metadata?.labels?.[RANCHER_REPO_LABEL] || '';
+    const params = {
+      have, want, state, repo
+    };
+    let passed: boolean | null = false;
+    let code = 'other';
 
+    if (have === want) {
+      passed = state === 'deployed' ? (repo ? true : null) : false;
+      code = state === 'deployed' ? (repo ? 'ok' : 'notByRancher') : 'notDeployed';
+    }
     checks.push({
-      key:    'chart',
-      passed: ok,
-      code:   ok ? 'ok' : (have === want ? 'notDeployed' : 'other'),
-      params: {
-        have, want, state
-      }
+      key: 'chart', passed, code, params
     });
   }
 

@@ -239,7 +239,8 @@ elemental3:
       waiting: 'After the import Rancher replaces the upgrade controller in the cluster with its own and installs its node agent. This needs no action and usually takes 5 to 35 minutes. An upgrade started earlier fails on every node until Rancher is done, so Upgrade stays disabled until the checks below pass. This page checks again every 10 seconds.'
       unknown: 'One of the checks below could not be read with your account. If the cluster was imported less than about 35 minutes ago, Rancher may still be replacing its upgrade controller, and an upgrade started now can fail on every node until that is done. Upgrade is not disabled.'
     chart:
-      ok: 'The upgrade controller is the one Rancher installs (chart {have})'
+      ok: 'The upgrade controller is the one Rancher installs (chart {have} from {repo})'
+      notByRancher: 'The upgrade controller has the chart version Rancher installs ({have}), but Rancher did not install it; whether Rancher still replaces it cannot be read'
       notManaged: 'Rancher installs no upgrade controller of its own on this cluster; the one of the release stays (chart {have})'
       other: 'The upgrade controller is still the one the cluster was installed with (chart {have}); Rancher replaces it with chart {want}'
       notDeployed: 'Rancher is installing its upgrade controller (chart {want}, state: {state})'

@@ -282,7 +282,12 @@ describe('running Kubernetes versions', () => {
  * replaced the upgrade controller the release had installed.
  */
 describe('upgradeReadiness', () => {
-  const app = (version: string, state = 'deployed') => ({ spec: { chart: { metadata: { name: 'system-upgrade-controller', version } }, info: { status: state } }, status: { summary: { state } } });
+  // Rancher's catalog labels the release it installed with its chart repository; the release's own chart has no such label
+  const app = (version: string, state = 'deployed', repo = version === '110.0.0' ? 'rancher-charts' : '') => ({
+    metadata: { labels: repo ? { 'catalog.cattle.io/cluster-repo-name': repo } : {} },
+    spec:     { chart: { metadata: { name: 'system-upgrade-controller', version } }, info: { status: state } },
+    status:   { summary: { state } },
+  });
   const deployment = (image: string, generation: number, st: any) => ({
     metadata: { generation }, spec: { replicas: 1, template: { spec: { containers: [{ image }] } } }, status: st
   });
@@ -354,6 +359,13 @@ describe('upgradeReadiness', () => {
     expect(upgradeReadiness({
       ...settled, deployment: undefined, app: app('109.0.2')
     }).state).toBe('waiting');
+  });
+
+  it('is unknown when the chart has the right version but Rancher did not install it (cluster created from a release that ships the same chart)', () => {
+    const r = upgradeReadiness({ ...settled, app: app('110.0.0', 'deployed', '') });
+
+    expect(byKey(r, 'chart')).toMatchObject({ passed: null, code: 'notByRancher' });
+    expect(r.state).toBe('unknown');
   });
 
   it('passes the chart check when Rancher installs no controller of its own (empty setting)', () => {
