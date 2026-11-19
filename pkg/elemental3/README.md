@@ -60,6 +60,17 @@ releases other clusters in the namespace were created from. A version, or a whol
 `registry/path/manifest:version`, can always be typed. The rules are in `lib/catalog.ts` and `lib/release.ts`
 (`offeredReleases`).
 
+Since 0.5.1: an entry reads `version · [last known ·] Kubernetes …, OS … [· source <name>]`
+(the catalog source is named when the release comes from another repository than the current one; the repository
+itself is shown under the picker for the selected release, with a warning when that entry is stale). Nothing is
+selected by default; the list is ordered highest first, so the first entry is the newest release the cluster can
+reach. The catalog is read again once a minute. "Higher" is decided exactly as the Lifecycle Manager's admission
+webhook decides it (`compareVersions` in `lib/release.ts`, a port of `version.Parse(new).Compare(applied)` of
+`k8s.io/apimachinery/pkg/util/version`), which is not semantic version precedence: a numeric field against a
+non-numeric one is compared as text, so `1.37.2-26.4` is higher than `1.37.2-26.3-e3p.1` and `1.37.2-26.10` is
+lower, and the order is not transitive. `lib/__tests__/webhook-order.json` is a table printed by the webhook's own
+function; the unit tests replay all of it.
+
 **Ready for an upgrade.** Rancher changes an imported cluster for some minutes after it reports it ready: it replaces
 the system upgrade controller the release installed with the chart of its setting
 `system-upgrade-controller-chart-version`, and installs its node agent with a Plan. An upgrade started before that

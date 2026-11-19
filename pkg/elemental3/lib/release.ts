@@ -50,63 +50,181 @@ export function manifestRef(r: ReleaseRef): string {
   return `${ r.registry }:${ r.version }`;
 }
 
-interface Semver { core: number[]; pre: string[] }
+/**
+ * A version as the Lifecycle Manager's admission webhook reads it: `version.Parse` of
+ * k8s.io/apimachinery/pkg/util/version (internal/webhook/v1alpha1/release_webhook.go, validateReleaseVersion).
+ * `semver` is false when the text is only a "generic" version (two or more numeric fields followed by
+ * anything); then nothing after the numeric fields takes part in a comparison.
+ */
+export interface ParsedVersion { components: string[]; semver: boolean; preRelease: string }
 
-/** Semantic version as the Lifecycle Manager reads it (a leading "v" is tolerated). null when it is not one. */
-export function parseVersion(v: string): Semver | null {
-  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec((v || '').trim());
+// The two expressions of the Go package, with Go's \s written out (JavaScript's \s matches more).
+const VERSION_RE = /^[\t\n\f\r ]*v?([0-9]+(?:\.[0-9]+)*)([^\n]*)$/;
+const EXTRA_RE = /^(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?[\t\n\f\r ]*$/;
+const MAX_UINT = '18446744073709551615';
 
-  if (!m) {
+/** strconv.ParseUint(s, 10, 0): the digits without leading zeros, or null when s is not an unsigned 64-bit number. */
+function uint(s: string): string | null {
+  if (!/^[0-9]+$/.test(s)) {
     return null;
   }
+  const n = s.replace(/^0+(?=[0-9])/, '');
 
-  return { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
+  return n.length > MAX_UINT.length || (n.length === MAX_UINT.length && n > MAX_UINT) ? null : n;
+}
+
+/** Order of two numbers given as digits without leading zeros. */
+function cmpUint(a: string, b: string): number {
+  if (a.length !== b.length) {
+    return a.length < b.length ? -1 : 1;
+  }
+
+  return a === b ? 0 : (a < b ? -1 : 1);
+}
+
+const zeroPrefixed = (s: string) => s.startsWith('0') && s !== '0';
+
+function parseAs(text: string, semver: boolean): ParsedVersion | null {
+  const parts = VERSION_RE.exec(`${ text ?? '' }`);
+
+  if (!parts) {
+    return null;
+  }
+  const fields = parts[1].split('.');
+
+  if ((semver && fields.length !== 3) || (!semver && fields.length < 2)) {
+    return null;
+  }
+  const components: string[] = [];
+
+  for (let i = 0; i < fields.length; i++) {
+    const n = uint(fields[i]);
+
+    if (((i === 0 || semver) && zeroPrefixed(fields[i])) || n === null) {
+      return null;
+    }
+    components.push(n);
+  }
+  let preRelease = '';
+
+  if (semver && parts[2] !== '') {
+    const extra = EXTRA_RE.exec(parts[2]);
+
+    if (!extra) {
+      return null;
+    }
+    preRelease = extra[1] || '';
+    if (preRelease.split('.').some((f) => uint(f) !== null && zeroPrefixed(f))) {
+      return null;
+    }
+  }
+
+  return {
+    components, semver, preRelease
+  };
 }
 
 /**
- * Semantic version precedence: negative when a < b, 0 when equal, positive when a > b; NaN when either
- * is not a semantic version. Note that "1.37.2-20.3" is, by these rules, a pre-release of 1.37.2:
- * the build number of an Elemental release sits in the pre-release field.
+ * The version the webhook would accept for `Release.spec.version`: a semantic version (a leading "v" is
+ * tolerated), else a generic one. null when the webhook would refuse the text ("is not a semantic version").
  */
-export function compareVersions(a: string, b: string): number {
-  const x = parseVersion(a);
-  const y = parseVersion(b);
-
-  if (!x || !y) {
-    return NaN;
+export function parseVersion(v: string): ParsedVersion | null {
+  if (!v) {
+    return null;
   }
-  for (let i = 0; i < 3; i++) {
-    if (x.core[i] !== y.core[i]) {
-      return x.core[i] - y.core[i];
+
+  return parseAs(v, true) || parseAs(v, false);
+}
+
+function compareParsed(v: ParsedVersion, o: ParsedVersion): number {
+  const common = Math.min(v.components.length, o.components.length);
+
+  for (let i = 0; i < common; i++) {
+    const c = cmpUint(v.components[i], o.components[i]);
+
+    if (c !== 0) {
+      return c;
     }
   }
-  if (!x.pre.length || !y.pre.length) {
-    return (x.pre.length ? 0 : 1) - (y.pre.length ? 0 : 1);
-  }
-  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
-    const p = x.pre[i];
-    const q = y.pre[i];
+  const nonZero = (rest: string[]) => rest.some((n) => n !== '0');
 
-    if (p === undefined || q === undefined) {
-      return p === undefined ? -1 : 1;
-    }
-    if (p === q) {
+  if (o.components.length < v.components.length && nonZero(v.components.slice(common))) {
+    return 1;
+  }
+  if (o.components.length > v.components.length && nonZero(o.components.slice(common))) {
+    return -1;
+  }
+  if (!v.semver || !o.semver) {
+    return 0;
+  }
+  if (v.preRelease === '' && o.preRelease !== '') {
+    return 1;
+  }
+  if (v.preRelease !== '' && o.preRelease === '') {
+    return -1;
+  }
+  if (v.preRelease === o.preRelease) {
+    return 0;
+  }
+  const vp = v.preRelease.split('.');
+  const op = o.preRelease.split('.');
+
+  for (let i = 0; i < vp.length && i < op.length; i++) {
+    const vn = uint(vp[i]);
+    const on = vn === null ? null : uint(op[i]);
+
+    if (vn !== null && on !== null) {
+      const c = cmpUint(vn, on);
+
+      if (c !== 0) {
+        return c;
+      }
       continue;
     }
-    const pn = /^\d+$/.test(p);
-    const qn = /^\d+$/.test(q);
-
-    if (pn && qn) {
-      return Number(p) - Number(q);
+    // Not two numbers: the fields are compared as text, also a number against a text. This is where the
+    // webhook leaves semantic versioning (there a number is always lower than a text).
+    if (op[i] < vp[i]) {
+      return 1;
     }
-    if (pn !== qn) {
-      return pn ? -1 : 1;
+    if (op[i] > vp[i]) {
+      return -1;
     }
-
-    return p < q ? -1 : 1;
+  }
+  if (op.length !== vp.length) {
+    return op.length < vp.length ? 1 : -1;
   }
 
   return 0;
+}
+
+/**
+ * The order of two release versions exactly as the Lifecycle Manager's admission webhook decides it for
+ * "may a cluster on `b` be set to `a`": positive when a is higher (accepted), 0 when equal and negative
+ * when lower (both refused), NaN when the webhook would answer with an error. It is the webhook's
+ * `validateReleaseVersion(a).Compare(b)`, so `a` is the new version and `b` the applied one, and the
+ * arguments are not interchangeable in the corner cases: `b` is read the way `a` could be read
+ * (semantic or generic).
+ *
+ * This is NOT semantic version precedence. Three things differ, and all are kept on purpose, because
+ * the picker must offer what the webhook accepts and nothing else:
+ *  - "1.37.2-20.3" is a pre-release of 1.37.2 for both, but a numeric field against a non-numeric one
+ *    is compared as text here ("4" > "3-e3p", "10" < "3-e3p"), while semantic versioning calls every
+ *    number lower. So 1.37.2-26.4 is higher than 1.37.2-26.3-e3p.1 and 1.37.2-26.10 is lower.
+ *  - Because of that the order is not transitive: 26.10 < 26.3-e3p.1 < 26.4 < 26.10. Sorting a list
+ *    with it gives a usable order only while no such triple is in the list.
+ *  - A text that is no semantic version but starts with two or more numeric fields ("1.37",
+ *    "1.37.2.1", "1.37.2-26.3_x") is accepted and compared by its numeric fields alone.
+ * Unit tests replay a table printed by the webhook's own function (lib/__tests__/webhook-order.json).
+ */
+export function compareVersions(a: string, b: string): number {
+  const x = parseVersion(a);
+
+  if (!x) {
+    return NaN;
+  }
+  const y = parseAs(b, x.semver);
+
+  return y ? compareParsed(x, y) : NaN;
 }
 
 function cond(release: any, type: string): any {
@@ -201,6 +319,8 @@ export interface ReleaseOption {
   os?: string;
   /** Only from the release catalog: the entry is the last known one, its source did not answer */
   stale?: boolean;
+  /** Only from the release catalog: name of the ReleaseSource the entry comes from */
+  catalogSource?: string;
 }
 
 export interface OfferedRelease extends ReleaseOption {

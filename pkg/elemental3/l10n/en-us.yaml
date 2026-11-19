@@ -210,7 +210,10 @@ elemental3:
     targetInvalid: 'Type a version such as 1.37.2-20.3. When the registry of the current release is not known, type the whole manifest reference: registry/path/manifest:version.'
     option: '{version} ({source})'
     optionFrom: '{version} from {registry} ({source})'
-    stale: 'last known, source not reachable'
+    stale: 'last known'
+    fromSource: 'source {source}'
+    catalogSource: 'catalog source {source}'
+    pickedStale: 'The catalog source {source} did not answer when the management cluster last asked it, so {version} is the last known entry and may be gone or unreachable. The cluster pulls the release from {registry} itself; if it cannot reach it, the upgrade cannot fetch the release. Upgrade is not disabled: the management cluster and the workload cluster do not have to reach the same registries.'
     catalog:
       installed: 'Releases from the release catalog of the management cluster. A version can also be typed.'
       stale: 'Releases from the release catalog; the source {sources} does not answer, so its entries are the last known ones. A version can also be typed.'

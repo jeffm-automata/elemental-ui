@@ -1,7 +1,8 @@
 import {
-  appliedVersion, buildRelease, compareVersions, nodeFacts, offeredReleases, parseManifestRef, pickedText, preflight, preflightPassed, planPendingNodes, runningByPool, runningKubernetes, selects,
+  appliedVersion, buildRelease, compareVersions, nodeFacts, offeredReleases, parseManifestRef, parseVersion, pickedText, preflight, preflightPassed, planPendingNodes, runningByPool, runningKubernetes, selects,
   upgradePhases, upgradeReadiness, upgradeState
 } from '../release';
+import webhookOrder from './webhook-order.json';
 
 const c = (type: string, status: string, reason: string, message = '') => ({
   type, status, reason, message, lastTransitionTime: '2026-11-17T03:00:00Z'
@@ -66,6 +67,89 @@ describe('compareVersions', () => {
 
   it('does not guess for something that is not a version', () => {
     expect(compareVersions('latest', '1.37.2-20.3')).toBeNaN();
+    expect(compareVersions('', '1.37.2-20.3')).toBeNaN();
+    expect(compareVersions('1.37.2-20.3', 'latest')).toBeNaN();
+  });
+});
+
+describe('compareVersions is the order of the Lifecycle Manager webhook, not semantic versioning', () => {
+  // Every ordered pair of 43 versions, decided by the webhook's own function (see the comment in the file).
+  const table = webhookOrder as unknown as { versions: string[]; rows: [string, string, number | null][] };
+
+  it('agrees with the webhook on every pair of its table', () => {
+    expect(table.rows).toHaveLength(table.versions.length * table.versions.length);
+    const differ = table.rows.filter(([neu, applied, result]) => {
+      const ui = compareVersions(neu, applied);
+
+      return result === null ? !Number.isNaN(ui) : Math.sign(ui) !== result;
+    }).map(([neu, applied, result]) => `new ${ JSON.stringify(neu) } applied ${ JSON.stringify(applied) }: webhook ${ result }, here ${ compareVersions(neu, applied) }`);
+
+    expect(differ).toStrictEqual([]);
+  });
+
+  it('accepts exactly what the webhook accepts as a version', () => {
+    table.versions.forEach((v) => {
+      const accepted = table.rows.some(([neu, , result]) => neu === v && result !== null);
+
+      expect(`${ v }: ${ parseVersion(v) !== null }`).toBe(`${ v }: ${ accepted }`);
+    });
+  });
+
+  it.each([
+    // a published build after the base of a carried release: a number against a text is compared as text
+    ['1.37.2-26.4', '1.37.2-26.3-e3p.1', 1],
+    ['1.37.2-26.9', '1.37.2-26.3-e3p.1', 1],
+    ['1.37.2-26.30', '1.37.2-26.3-e3p.1', 1],
+    ['1.37.2-26.10', '1.37.2-26.3-e3p.1', -1],
+    ['1.37.2-26.3-e3p.1', '1.37.2-26.4', -1],
+    ['1.37.2-27.1', '1.37.2-26.3-e3p.1', 1],
+    // the carried release over its base and over the carried release before it
+    ['1.37.2-26.3-e3p.1', '1.37.2-26.3', 1],
+    ['1.37.2-26.3', '1.37.2-26.3-e3p.1', -1],
+    ['1.37.2-26.3-e3p.1', '1.37.2-20.3-e3p.1', 1],
+    ['1.37.2-26.3', '1.37.2-20.3-e3p.1', 1],
+    // numbers stay numbers
+    ['1.37.2-26.3-e3p.10', '1.37.2-26.3-e3p.9', 1],
+    ['1.37.2-100.1', '1.37.2-27.1', 1],
+    // generic versions: only the numeric fields count
+    ['1.37.2-26.3_x', '1.37.2-20.1', 0],
+    ['1.37.2.1', '1.37.2-26.3', 1],
+    ['1.37', '1.37.2-26.3', -1],
+  ])('%s over %s', (a, b, sign) => {
+    expect(Math.sign(compareVersions(a, b))).toBe(sign);
+  });
+
+  it('is not transitive: no list that holds such a triple has one right order', () => {
+    expect(compareVersions('1.37.2-26.3-e3p.1', '1.37.2-26.10')).toBeGreaterThan(0);
+    expect(compareVersions('1.37.2-26.4', '1.37.2-26.3-e3p.1')).toBeGreaterThan(0);
+    expect(compareVersions('1.37.2-26.10', '1.37.2-26.4')).toBeGreaterThan(0);
+  });
+
+  it('a semantic new version against an applied one that is not: the webhook answers with an error', () => {
+    expect(compareVersions('1.37.2-26.3', '1.37')).toBeNaN();
+    expect(compareVersions('1.37', '1.37.2-26.3')).toBeLessThan(0);
+  });
+});
+
+describe('offeredReleases follows the webhook for a cluster on a carried release', () => {
+  const repo = 'registry.example/rke2-manifest';
+  const known = ['1.37.2-26.3', '1.37.2-26.3-e3p.1', '1.37.2-26.4', '1.37.2-26.10', '1.37.2-27.1', '1.37.2-20.3-e3p.1'].map((version) => ({
+    registry: repo, version, source: 'catalog' as const, lineage: 'suse-core'
+  }));
+
+  it('offers 26.4 and 27.1 (the webhook accepts them), not 26.10 and not the base (it refuses them)', () => {
+    const offered = offeredReleases(known, { registry: repo, version: '1.37.2-26.3-e3p.1' }, 'suse-core');
+
+    expect(offered.filter((o) => !o.blocked).map((o) => o.version)).toStrictEqual(['1.37.2-27.1', '1.37.2-26.4']);
+    expect(offered.filter((o) => o.blocked === 'notNewer').map((o) => o.version).sort()).toStrictEqual(['1.37.2-20.3-e3p.1', '1.37.2-26.10', '1.37.2-26.3', '1.37.2-26.3-e3p.1']);
+  });
+
+  it('from the published start release: the newest carried release is first', () => {
+    const offered = offeredReleases(known, { registry: repo, version: '1.37.1-17.1' }, 'suse-core').filter((o) => !o.blocked).map((o) => o.version);
+
+    expect(offered[0]).toBe('1.37.2-27.1');
+    expect(offered.indexOf('1.37.2-26.3-e3p.1')).toBeLessThan(offered.indexOf('1.37.2-26.3'));
+    expect(offered).toHaveLength(6);
   });
 });
 

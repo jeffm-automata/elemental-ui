@@ -1,5 +1,5 @@
 import {
-  CATALOG_PATH, catalogOptions, componentText, currentLineage, knownReleases, notOfferedGroups, staleSources
+  CATALOG_PATH, catalogLabel, catalogOptions, componentText, currentLineage, knownReleases, notOfferedGroups, pickedRelease, staleSources
 } from '../catalog';
 import { ReleaseOption, offeredReleases } from '../release';
 
@@ -41,13 +41,48 @@ const fallback: ReleaseOption[] = [{
 
 const httpError = (status: number) => Object.assign(new Error(`HTTP ${ status }`), { _status: status });
 
+describe('catalogLabel and pickedRelease', () => {
+  const words = { stale: 'last known', source: (name: string) => `source ${ name }` };
+  const options = catalogOptions(catalogList.items);
+
+  it('same repository as the current release: version, Kubernetes, OS', () => {
+    expect(catalogLabel(options[1], PUBLISHED, words)).toBe('1.37.2-20.3 · Kubernetes v1.37.2+rke2r1, OS 16.1-76.43');
+  });
+
+  it('another repository: the catalog source is named, not the repository; the stale mark comes right after the version', () => {
+    const label = catalogLabel(options[2], PUBLISHED, words);
+
+    expect(label).toBe('1.37.2-20.3-e3p.1 · last known · Kubernetes v1.37.2+rke2r1, OS 16.1-76.43-e3p.1 · source carried');
+    expect(label).not.toContain(CARRIED);
+    // 0.5.0 made 'version from <repository> (release catalog) · Kubernetes ..., OS ... · last known, source not reachable':
+    // 1049 px for this kind of entry on the lab catalog, wider than the page, with the stale mark cut off
+    expect(label.indexOf('last known')).toBeLessThan(40);
+    expect(label.length).toBeLessThan(100);
+  });
+
+  it('an entry without a source name falls back to the repository, and nothing is added when no current repository is known', () => {
+    expect(catalogLabel({
+      ...options[2], catalogSource: undefined, stale: false
+    }, PUBLISHED, words)).toBe(`1.37.2-20.3-e3p.1 · Kubernetes v1.37.2+rke2r1, OS 16.1-76.43-e3p.1 · ${ CARRIED }`);
+    expect(catalogLabel(options[2], '', words)).toBe('1.37.2-20.3-e3p.1 · last known · Kubernetes v1.37.2+rke2r1, OS 16.1-76.43-e3p.1');
+  });
+
+  it('finds the entry a selected or typed target names: version and repository, an oci:// prefix does not matter', () => {
+    expect(pickedRelease(options, { registry: CARRIED, version: '1.37.2-20.3-e3p.1' })?.stale).toBe(true);
+    expect(pickedRelease(options, { registry: `oci://${ CARRIED }/`, version: '1.37.2-20.3-e3p.1' })?.catalogSource).toBe('carried');
+    expect(pickedRelease(options, { registry: PUBLISHED, version: '1.37.2-20.3-e3p.1' })).toBeUndefined();
+    expect(pickedRelease(options, { registry: CARRIED, version: '9.9.9-1.1' })).toBeUndefined();
+    expect(pickedRelease(options, null)).toBeUndefined();
+  });
+});
+
 describe('catalogOptions', () => {
   it('reads version, repository, lineage, Kubernetes, OS and the stale mark', () => {
     const out = catalogOptions(catalogList.items);
 
     expect(out).toHaveLength(5);
     expect(out[2]).toStrictEqual({
-      registry: CARRIED, version: '1.37.2-20.3-e3p.1', source: 'catalog', lineage: 'suse-core', kubernetes: 'v1.37.2+rke2r1', os: '16.1-76.43-e3p.1', stale: true
+      registry: CARRIED, version: '1.37.2-20.3-e3p.1', source: 'catalog', lineage: 'suse-core', kubernetes: 'v1.37.2+rke2r1', os: '16.1-76.43-e3p.1', stale: true, catalogSource: 'carried'
     });
     expect(out[0].stale).toBe(false);
   });

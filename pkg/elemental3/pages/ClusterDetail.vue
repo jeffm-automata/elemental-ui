@@ -18,7 +18,7 @@ import {
 } from '../lib/release';
 import { IMAGE_RELEASE_ANNOTATION, NODE_IMAGE_TYPE, errorText, harvesterBase } from '../lib/harvester';
 import {
-  CATALOG_PATH, componentText, currentLineage, knownReleases, notOfferedGroups
+  CATALOG_PATH, catalogLabel, componentText, currentLineage, knownReleases, notOfferedGroups, pickedRelease
 } from '../lib/catalog';
 import { LIST_ROUTE, BLANK_CLUSTER } from '../product';
 
@@ -120,6 +120,11 @@ export default {
       this.load();
       if (++n % 6 === 0 && this.rightsIncomplete) {
         this.loadRights();
+      }
+      // The catalog changes without this page (a new release, a source that stops answering): read it again once
+      // a minute. Not without a catalog (the fallback reads Harvester), and not while an upgrade runs.
+      if (n % 6 === 0 && this.releasesFrom === 'catalog' && !this.upgradeRunning) {
+        this.loadKnownReleases();
       }
     }, REFRESH_MS);
   },
@@ -294,15 +299,35 @@ export default {
     releaseOptions() {
       const here = this.currentRelease?.registry || '';
 
-      // The repository is named only when the release comes from another one than the current release
       return this.offered.filter((o) => !o.blocked).map((o) => {
+        // Catalog entries: version, stale mark, Kubernetes, OS, and the catalog source when the repository is another one
+        if (o.source === 'catalog') {
+          return {
+            value: manifestRef(o),
+            label: catalogLabel(o, here, { stale: this.t('elemental3.release.stale'), source: (name) => this.t('elemental3.release.fromSource', { source: name }) })
+          };
+        }
+        // Without a catalog: the repository is named only when the release comes from another one than the current release
         const base = this.t(o.registry === here || !here ? 'elemental3.release.option' : 'elemental3.release.optionFrom', {
           version: o.version, registry: o.registry, source: this.t(`elemental3.release.source.${ o.source }`)
         });
-        const parts = [base, componentText(o), o.stale ? this.t('elemental3.release.stale') : ''].filter((x) => !!x);
 
-        return { value: manifestRef(o), label: parts.join(' · ') };
+        return { value: manifestRef(o), label: base };
       });
+    },
+
+    /** The catalog entry the selected or typed target names; undefined for a target the catalog does not hold. */
+    picked() {
+      const known = pickedRelease(this.offered, this.target);
+
+      return known && known.source === 'catalog' ? known : undefined;
+    },
+
+    /** One line about the picked catalog entry: the whole manifest reference, Kubernetes, OS, catalog source */
+    pickedNote() {
+      const p = this.picked;
+
+      return p ? [manifestRef(p), componentText(p), p.catalogSource ? this.t('elemental3.release.catalogSource', { source: p.catalogSource }) : ''].filter((x) => !!x).join(' · ') : '';
     },
 
     /** One line under the picker that says where its list comes from */
@@ -1109,6 +1134,13 @@ export default {
               {{ releaseListNote }}
             </div>
             <div
+              v-if="pickedNote"
+              class="e3-small mt-5"
+              data-testid="elemental3-release-picked"
+            >
+              {{ pickedNote }}
+            </div>
+            <div
               v-if="notOffered.length"
               class="text-muted e3-small mt-5"
               data-testid="elemental3-release-not-offered"
@@ -1174,6 +1206,12 @@ export default {
           v-if="targetInvalid"
           color="error"
           :label="t('elemental3.release.targetInvalid')"
+        />
+        <Banner
+          v-if="picked && picked.stale && !upgradeRunning"
+          color="warning"
+          data-testid="elemental3-release-picked-stale"
+          :label="t('elemental3.release.pickedStale', { version: picked.version, source: picked.catalogSource || picked.registry, registry: picked.registry })"
         />
 
         <div

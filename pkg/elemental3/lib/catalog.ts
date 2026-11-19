@@ -49,6 +49,7 @@ export function catalogOptions(items: any[]): ReleaseOption[] {
       kubernetes: spec.kubernetes?.version || '',
       os:         spec.operatingSystem?.version || '',
       stale:      item?.status?.stale === true,
+      ...(spec.source ? { catalogSource: `${ spec.source }` } : {}),
     });
   });
 
@@ -120,6 +121,36 @@ export async function knownReleases(readCatalog: () => Promise<any>, readFallbac
 /** "Kubernetes v1.37.2+rke2r1, OS 16.1-76.43" out of what the catalog states; '' for entries from elsewhere. */
 export function componentText(o: ReleaseOption): string {
   return [o.kubernetes ? `Kubernetes ${ o.kubernetes }` : '', o.os ? `OS ${ o.os }` : ''].filter((x) => !!x).join(', ');
+}
+
+/**
+ * The text of a picker entry out of the catalog, short enough for a select: the version first, then the
+ * stale mark (it must not be the part a narrow list cuts off), Kubernetes and OS, and last the catalog
+ * source when the release comes from another repository than the cluster's current one. The repository
+ * itself is not in the entry (0.5.0 put it there and the list ran off the page); the page shows it for
+ * the selected release. `words` are the translated texts.
+ */
+export function catalogLabel(o: ReleaseOption, currentRegistry: string, words: { stale: string; source: (name: string) => string }): string {
+  const elsewhere = !!currentRegistry && clean(o.registry) !== clean(currentRegistry);
+
+  return [
+    o.version,
+    o.stale ? words.stale : '',
+    componentText(o),
+    elsewhere ? (o.catalogSource ? words.source(o.catalogSource) : clean(o.registry)) : '',
+  ].filter((x) => !!x).join(' · ');
+}
+
+/**
+ * The known release the picker's target names, whether it was selected or typed: same version and same
+ * repository. undefined for a target the page knows nothing about.
+ */
+export function pickedRelease<T extends ReleaseOption>(known: T[], target: ReleaseRef | null): T | undefined {
+  if (!target?.version) {
+    return undefined;
+  }
+
+  return (known || []).find((k) => k.version === target.version && clean(k.registry) === clean(target.registry));
 }
 
 export interface NotOfferedGroup {
