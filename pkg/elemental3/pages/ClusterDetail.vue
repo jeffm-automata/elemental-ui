@@ -85,6 +85,8 @@ export default {
         wantedChart: undefined, app: undefined, deployment: undefined, plans: undefined
       },
       readinessRead:    0,
+      // true / false: the workload cluster serves the Release API or answers 404; undefined: not known
+      releaseApi:       undefined,
       targetKey:        '',
       dryRunError:      undefined,
       dryRunFor:        '',
@@ -334,7 +336,7 @@ export default {
         return null;
       }
 
-      return upgradeReadiness(this.readinessFacts);
+      return upgradeReadiness({ ...this.readinessFacts, releaseApi: this.releaseApi });
     },
 
     preflightChecks() {
@@ -509,6 +511,7 @@ export default {
 
         this.release = (list?.items || [])[0] || null;
         this.lastWorkloadRead = new Date().toISOString();
+        this.releaseApi = true;
         this.releaseError = '';
         this.releaseDenied = '';
       } catch (e) {
@@ -517,6 +520,7 @@ export default {
         if (status === 403) {
           this.releaseDenied = rightText(RELEASE_API, 'list');
         } else if (status === 404) {
+          this.releaseApi = false;
           this.releaseError = this.t('elemental3.release.noLifecycleManager');
         } else {
           this.releaseError = errorText(e);
@@ -1120,7 +1124,7 @@ export default {
           :label="t('elemental3.rights.missing', { right: releaseDenied }, true)"
         />
         <Banner
-          v-if="releaseError && !interrupted"
+          v-if="releaseError && !interrupted && !(releaseApi === false && readiness && readiness.state === 'waiting')"
           color="error"
           data-testid="elemental3-release-error"
           :label="releaseError"

@@ -250,6 +250,9 @@ elemental3:
     explain:
       waiting: 'After the import Rancher replaces the upgrade controller in the cluster with its own and installs its node agent. This needs no action and usually takes 5 to 35 minutes. An upgrade started earlier fails on every node until Rancher is done, so Upgrade stays disabled until the checks below pass. This page checks again every 10 seconds.'
       unknown: 'One of the checks below could not be read with your account. If the cluster was imported less than about 35 minutes ago, Rancher may still be replacing its upgrade controller, and an upgrade started now can fail on every node until that is done. Upgrade is not disabled.'
+    lifecycleManager:
+      ok: 'The Lifecycle Manager of the release is installed'
+      missing: 'The Lifecycle Manager of the release is not installed yet (the release installs its applications after the first boot)'
     chart:
       ok: 'The upgrade controller is the one Rancher installs (chart {have} from {repo})'
       notByRancher: 'The upgrade controller has the chart version Rancher installs ({have}), but Rancher did not install it; whether Rancher still replaces it cannot be read'

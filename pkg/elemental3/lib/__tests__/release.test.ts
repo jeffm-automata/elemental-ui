@@ -368,6 +368,17 @@ describe('upgradeReadiness', () => {
     expect(r.state).toBe('unknown');
   });
 
+  it('waits for the Lifecycle Manager when the caller says the cluster does not serve the Release API yet', () => {
+    const r = upgradeReadiness({ ...settled, releaseApi: false });
+
+    expect(r.state).toBe('waiting');
+    expect(r.checks[0]).toMatchObject({
+      key: 'lifecycleManager', passed: false, code: 'missing'
+    });
+    expect(upgradeReadiness({ ...settled, releaseApi: true }).checks.map((c) => c.passed)).toEqual([true, true, true, true]);
+    expect(upgradeReadiness(settled).checks.map((c) => c.key)).toEqual(['chart', 'controller', 'plans']);
+  });
+
   it('passes the chart check when Rancher installs no controller of its own (empty setting)', () => {
     expect(byKey(upgradeReadiness({
       ...settled, wantedChart: '', app: app('109.0.2')

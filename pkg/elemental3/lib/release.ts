@@ -424,10 +424,16 @@ export interface ReadinessFacts {
   deployment: any | null | undefined;
   /** plans.upgrade.cattle.io in cattle-system of the workload cluster */
   plans: any[] | undefined;
+  /**
+   * Does the workload cluster serve the Release API? false right after the first boot: the release installs
+   * its Lifecycle Manager as one of its applications, a few minutes after the nodes are up. Left out
+   * (undefined) when the caller did not ask.
+   */
+  releaseApi?: boolean | undefined;
 }
 
 export interface ReadinessCheck {
-  key: 'chart' | 'controller' | 'plans';
+  key: 'lifecycleManager' | 'chart' | 'controller' | 'plans';
   /** null: could not be checked */
   passed: boolean | null;
   /** Variant of the text to show */
@@ -460,11 +466,21 @@ export interface Readiness {
  *  3. plans:      no Plan in the controller's namespace is being applied to a node, and every Plan that
  *                 has been evaluated is complete (Rancher's node agent Plan is the one that matters).
  *
+ * A check before these, when the caller says whether the cluster serves the Release API: the release's
+ * Lifecycle Manager is installed (it arrives a few minutes after the first boot; without it nothing
+ * can be upgraded at all).
+ *
  * One of them false: waiting. All true: ready. Otherwise (something could not be read): unknown, which
  * warns and does not block.
  */
 export function upgradeReadiness(f: ReadinessFacts): Readiness {
   const checks: ReadinessCheck[] = [];
+
+  if (f.releaseApi !== undefined) {
+    checks.push({
+      key: 'lifecycleManager', passed: f.releaseApi, code: f.releaseApi ? 'ok' : 'missing', params: {}
+    });
+  }
   const have = f.app?.spec?.chart?.metadata?.version || '';
   const state = f.app?.status?.summary?.state || f.app?.spec?.info?.status || '';
   const want = f.wantedChart || '';
