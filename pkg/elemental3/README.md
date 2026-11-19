@@ -31,12 +31,49 @@ endpoint and a kube-vip manifest instead. Both need a Harvester provider that cr
 namespace-scoped identity, publishes node addresses and knows `external` (CAPHV v0.10.1 does not; the fork's
 `v0.10.1-e3p1` build does). The form writes no node address script and depends on no helper script.
 
+## The cluster page (since 0.2.0; this section describes 0.4.0)
+
+Cluster Management > Elemental 3 Clusters lists the clusters; a cluster's page shows provisioning progress, the
+Elemental release with the upgrade, machine pools, machines, conditions and events. The page reads object status with
+the rights of the logged-in user and writes only on a click: the replica count of a pool, the deletion of a worker
+`Machine` (Replace), a new `HarvesterMachineTemplate` plus the pool's reference to it (Change size), the cluster's one
+`Release` (lifecycle.suse.com/v1alpha1, in the workload cluster, through Rancher's cluster proxy), and the deletion
+of the `Cluster`.
+
+**Versions shown.** Cluster API keeps the Kubernetes version a cluster was created with; an upgrade in place by the
+Lifecycle Manager changes the nodes, not `spec.version`. The header and the pool table therefore show the kubelet
+versions of the nodes (from the workload cluster, else from `Machine.status.nodeInfo`) and say when Cluster API
+declares another one. "Current release" is `Release.status.version`, else the release the cluster was created from.
+
+**Releases offered for an upgrade.** There is no release catalog yet. The picker lists the releases the management
+side already knows: `NodeImage` objects of the image build operator, Harvester images that carry the annotation
+`elemental.suse.com/release-manifest`, and the releases other clusters in the namespace were created from; only
+newer releases of the same manifest repository name are offered, and a release from another registry names it. A
+version, or a whole manifest reference `registry/path/manifest:version`, can always be typed.
+
+**Ready for an upgrade.** Rancher changes an imported cluster for some minutes after it reports it ready: it replaces
+the system upgrade controller the release installed with the chart of its setting
+`system-upgrade-controller-chart-version`, and installs its node agent with a Plan. An upgrade started before that
+fails in cordon and drain until Rancher is done. The release panel reads, with the rights of the cluster's owner:
+
+| Check | Read | Passes when |
+|---|---|---|
+| chart | Rancher setting `system-upgrade-controller-chart-version` (management cluster); `apps.catalog.cattle.io` `cattle-system/system-upgrade-controller` (workload cluster) | the Helm release has the setting's chart version, is `deployed` and carries Rancher's label `catalog.cattle.io/cluster-repo-name` |
+| controller | `Deployment` `cattle-system/system-upgrade-controller` | generation observed, every replica updated and available |
+| plans | `plans.upgrade.cattle.io` in `cattle-system` | no Plan has nodes in `status.applying` and none has `Complete` other than `True` |
+
+One check failing: "not ready yet", and Upgrade stays disabled. Something unreadable, or the right chart version
+without Rancher's label: a warning, Upgrade stays possible. The rule is in `lib/release.ts` (`upgradeReadiness`).
+
 ## Layout
 
 - `provisioner.ts`: the card (`IClusterProvisioner` with its own `component`)
 - `components/CreateCluster.vue`: the form
-- `lib/objects.ts`: form values to objects, and validation (no dependencies)
+- `pages/ClusterList.vue`, `pages/ClusterDetail.vue`: the list and the cluster page
+- `lib/objects.ts`: form values to objects, validation, the machine size change (no dependencies)
 - `lib/harvester.ts`: Harvester and `NodeImage` data to form choices (no dependencies)
+- `lib/status.ts`: object status to progress phases, problems, pool and machine rows (no dependencies)
+- `lib/release.ts`: the release, upgrade phases, pre-flight, readiness, running versions (no dependencies)
 
 ## Build, lint, test
 
