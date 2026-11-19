@@ -336,7 +336,9 @@ export default {
         return null;
       }
 
-      return upgradeReadiness({ ...this.readinessFacts, releaseApi: this.releaseApi });
+      return upgradeReadiness({
+        ...this.readinessFacts, releaseApi: this.releaseApi, nodes: this.nodes
+      });
     },
 
     preflightChecks() {

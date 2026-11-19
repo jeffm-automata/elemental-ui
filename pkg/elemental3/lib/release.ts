@@ -430,6 +430,8 @@ export interface ReadinessFacts {
    * (undefined) when the caller did not ask.
    */
   releaseApi?: boolean | undefined;
+  /** Nodes of the workload cluster (raw objects), to see whether every node a Plan selects has got it. Optional. */
+  nodes?: any[] | null;
 }
 
 export interface ReadinessCheck {
@@ -463,8 +465,10 @@ export interface Readiness {
  *                 release that ships the same chart version) is unknown: whether Rancher still replaces
  *                 it cannot be read;
  *  2. controller: its Deployment is rolled out (the generation is observed, every replica updated and available);
- *  3. plans:      no Plan in the controller's namespace is being applied to a node, and every Plan that
- *                 has been evaluated is complete (Rancher's node agent Plan is the one that matters).
+ *  3. plans:      no Plan in the controller's namespace is being applied to a node, every Plan that has
+ *                 been evaluated is complete, and every node a Plan selects carries the Plan's label with
+ *                 its latest hash, which is how the controller marks a node it is done with (Rancher's
+ *                 node agent Plan is the one that matters; a node that has just joined has no label yet).
  *
  * A check before these, when the caller says whether the cluster serves the Release API: the release's
  * Lifecycle Manager is installed (it arrives a few minutes after the first boot; without it nothing
@@ -473,6 +477,68 @@ export interface Readiness {
  * One of them false: waiting. All true: ready. Otherwise (something could not be read): unknown, which
  * warns and does not block.
  */
+/** Label the system upgrade controller puts on a node it has applied a Plan to; the value is the Plan's latest hash. */
+export const PLAN_LABEL_PREFIX = 'plan.upgrade.cattle.io/';
+
+/** Does a label selector (matchLabels, matchExpressions) select these labels? null: it uses something this page does not know. */
+export function selects(selector: any, labels: Record<string, string>): boolean | null {
+  if (!selector) {
+    return null;
+  }
+  for (const [k, v] of Object.entries(selector.matchLabels || {})) {
+    if (labels[k] !== v) {
+      return false;
+    }
+  }
+  for (const e of selector.matchExpressions || []) {
+    const has = e.key in labels;
+    const among = has && (e.values || []).includes(labels[e.key]);
+
+    switch (e.operator) {
+    case 'In':
+      if (!among) {
+        return false;
+      }
+      break;
+    case 'NotIn':
+      if (among) {
+        return false;
+      }
+      break;
+    case 'Exists':
+      if (!has) {
+        return false;
+      }
+      break;
+    case 'DoesNotExist':
+      if (has) {
+        return false;
+      }
+      break;
+    default:
+      return null;
+    }
+  }
+
+  return true;
+}
+
+/** Names of the nodes a Plan selects that the controller has not marked as done with the Plan's latest hash. */
+export function planPendingNodes(plan: any, nodes?: any[] | null): string[] {
+  const hash = plan?.status?.latestHash;
+  const name = plan?.metadata?.name;
+
+  if (!nodes || !hash || !name) {
+    return [];
+  }
+
+  return nodes.filter((n) => {
+    const labels = n.metadata?.labels || {};
+
+    return selects(plan.spec?.nodeSelector, labels) === true && labels[`${ PLAN_LABEL_PREFIX }${ name }`] !== hash;
+  }).map((n) => `${ n.metadata?.name }`);
+}
+
 export function upgradeReadiness(f: ReadinessFacts): Readiness {
   const checks: ReadinessCheck[] = [];
 
@@ -544,15 +610,24 @@ export function upgradeReadiness(f: ReadinessFacts): Readiness {
       key: 'plans', passed: null, code: 'unread', params: {}
     });
   } else {
-    const busy = f.plans.filter((p) => (p.status?.applying || []).length > 0 || (p.status?.conditions || []).some((c: any) => c.type === 'Complete' && c.status !== 'True'));
-    const names = busy.map((p) => {
-      const on = (p.status?.applying || []).join(', ');
+    const waiting: string[] = [];
 
-      return on ? `${ p.metadata?.name } (${ on })` : `${ p.metadata?.name }`;
-    }).join('; ');
+    f.plans.forEach((p) => {
+      const name = `${ p.metadata?.name }`;
+      const applying: string[] = p.status?.applying || [];
+      const open = (p.status?.conditions || []).some((c: any) => c.type === 'Complete' && c.status !== 'True');
+      // Nodes the Plan selects that do not carry its label with its latest hash: the controller has not
+      // applied the Plan to them yet (a node that has just joined), although the Plan may say Complete
+      const pending = applying.length ? [] : planPendingNodes(p, f.nodes);
+      const on = [...applying, ...pending].join(', ');
+
+      if (applying.length || open || pending.length) {
+        waiting.push(on ? `${ name } (${ on })` : name);
+      }
+    });
 
     checks.push({
-      key: 'plans', passed: busy.length === 0, code: busy.length === 0 ? 'ok' : 'applying', params: { plans: names, count: f.plans.length }
+      key: 'plans', passed: waiting.length === 0, code: waiting.length === 0 ? 'ok' : 'applying', params: { plans: waiting.join('; '), count: f.plans.length }
     });
   }
 

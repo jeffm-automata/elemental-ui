@@ -1,5 +1,5 @@
 import {
-  appliedVersion, buildRelease, compareVersions, nodeFacts, offeredReleases, parseManifestRef, preflight, preflightPassed, runningByPool, runningKubernetes,
+  appliedVersion, buildRelease, compareVersions, nodeFacts, offeredReleases, parseManifestRef, preflight, preflightPassed, planPendingNodes, runningByPool, runningKubernetes, selects,
   upgradePhases, upgradeReadiness, upgradeState
 } from '../release';
 
@@ -347,6 +347,67 @@ describe('upgradeReadiness', () => {
 
     expect(r.state).toBe('waiting');
     expect(byKey(r, 'plans')).toMatchObject({ passed: false, params: { plans: 'system-agent-upgrader (c0-cp-a, c0-md-0-b)' } });
+  });
+
+  // As read on e3p-uic-c1 at 16:19Z: the Plan, and the node label the controller sets when it is done with a node
+  const agentPlan = {
+    metadata: { name: 'system-agent-upgrader' },
+    spec:     {
+      nodeSelector: {
+        matchExpressions: [{
+          key: 'kubernetes.io/os', operator: 'In', values: ['linux']
+        }]
+      }
+    },
+    status: { latestHash: '1b4a1b', conditions: [{ type: 'Complete', status: 'True' }] },
+  };
+  const node = (name: string, labels: any) => ({ metadata: { name, labels: { 'kubernetes.io/os': 'linux', ...labels } } });
+
+  it('waits for a node that has just joined: the Plan says Complete, the node does not carry its label yet', () => {
+    const done = node('c1-cp-a', { 'plan.upgrade.cattle.io/system-agent-upgrader': '1b4a1b' });
+    const joined = node('c1-md-0-new', {});
+    const old = node('c1-md-0-old', { 'plan.upgrade.cattle.io/system-agent-upgrader': 'an-older-hash' });
+
+    expect(planPendingNodes(agentPlan, [done, joined, old])).toEqual(['c1-md-0-new', 'c1-md-0-old']);
+    const r = upgradeReadiness({
+      ...settled, plans: [agentPlan], nodes: [done, joined]
+    });
+
+    expect(r.state).toBe('waiting');
+    expect(byKey(r, 'plans')).toMatchObject({ passed: false, params: { plans: 'system-agent-upgrader (c1-md-0-new)' } });
+    expect(upgradeReadiness({
+      ...settled, plans: [agentPlan], nodes: [done]
+    }).state).toBe('ready');
+  });
+
+  it('asks only the nodes a Plan selects, and nothing when the nodes or the hash are not known', () => {
+    const windows = {
+      ...agentPlan,
+      metadata: { name: 'system-agent-upgrader-windows' },
+      spec:     {
+        nodeSelector: {
+          matchExpressions: [{
+            key: 'kubernetes.io/os', operator: 'In', values: ['windows']
+          }]
+        }
+      }
+    };
+
+    expect(planPendingNodes(windows, [node('a', {})])).toEqual([]);
+    expect(planPendingNodes(agentPlan, null)).toEqual([]);
+    expect(planPendingNodes({ ...agentPlan, status: {} }, [node('a', {})])).toEqual([]);
+    expect(selects({
+      matchLabels:      { x: '1' },
+      matchExpressions: [{ key: 'y', operator: 'Exists' }, { key: 'z', operator: 'DoesNotExist' }, {
+        key: 'x', operator: 'NotIn', values: ['2']
+      }]
+    }, { x: '1', y: '' })).toBe(true);
+    expect(selects({
+      matchExpressions: [{
+        key: 'y', operator: 'Gt', values: ['1']
+      }]
+    }, { y: '2' })).toBeNull();
+    expect(selects(undefined, {})).toBeNull();
   });
 
   it('does not wait for a plan the controller has not evaluated yet when nothing else is open (a plan without conditions matches no rule)', () => {

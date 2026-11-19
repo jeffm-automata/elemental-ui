@@ -268,8 +268,8 @@ elemental3:
       missing: 'The upgrade controller is not deployed'
       unread: 'The upgrade controller''s Deployment could not be read'
     plans:
-      ok: 'Rancher''s node agent is installed: no plan of the upgrade controller is being applied'
-      applying: 'Still being applied to nodes: {plans}'
+      ok: 'Rancher''s node agent is installed on every node: no plan of the upgrade controller is open'
+      applying: 'Not yet applied to every node: {plans}'
       unread: 'The plans of the upgrade controller could not be read'
   preflight:
     title: 'Checks before upgrading to {version}'
