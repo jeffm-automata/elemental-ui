@@ -223,12 +223,12 @@ elemental3:
       nodeImage: node image built
       image: node image in Harvester
       cluster: used by another cluster
-    notOffered: '{version} is not offered: {why}'
-    notOfferedMore: 'and {count} more releases that are not offered'
+    notOffered: 'Not offered ({count}), {why}: {versions}'
+    notOfferedMore: 'Not offered ({count}), {why}: {versions} and {more} more'
     blocked:
       notNewer: not newer than the current release
-      notComparable: its version cannot be compared with the current one
-      otherLineage: it belongs to another product line than the current release
+      notComparable: version cannot be compared with the current one
+      otherLineage: another lineage than the current release
     upgrade: Upgrade
     upgradeFailed: 'The Release was not accepted: {error}'
     afterImport: 'Upgrades become available here once the machines are up and Rancher has imported the cluster.'

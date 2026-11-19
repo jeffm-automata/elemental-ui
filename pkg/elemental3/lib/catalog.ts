@@ -5,7 +5,7 @@
  * is not installed, not readable or empty it falls back to what the page knew before (node images of the
  * build operator, annotated Harvester images, other clusters).
  */
-import { ReleaseOption, ReleaseRef } from './release';
+import { OfferedRelease, ReleaseOption, ReleaseRef } from './release';
 
 /** Collection path relative to the Kubernetes API root of the management cluster. */
 export const CATALOG_PATH = '/apis/lifecycle.suse.com/v1alpha1/availablereleases';
@@ -120,4 +120,30 @@ export async function knownReleases(readCatalog: () => Promise<any>, readFallbac
 /** "Kubernetes v1.37.2+rke2r1, OS 16.1-76.43" out of what the catalog states; '' for entries from elsewhere. */
 export function componentText(o: ReleaseOption): string {
   return [o.kubernetes ? `Kubernetes ${ o.kubernetes }` : '', o.os ? `OS ${ o.os }` : ''].filter((x) => !!x).join(', ');
+}
+
+export interface NotOfferedGroup {
+  blocked: OfferedRelease['blocked'];
+  /** Number of distinct versions not offered for this reason */
+  count: number;
+  /** The first versions (highest first), at most `show` */
+  versions: string[];
+  /** count minus the versions named */
+  more: number;
+}
+
+/**
+ * Known releases that are not valid targets, one group per reason, so that a catalog with fifty old
+ * releases makes one line and not fifty. The current release itself is not counted.
+ */
+export function notOfferedGroups(offered: OfferedRelease[], currentVersion = '', show = 3): NotOfferedGroup[] {
+  const order: OfferedRelease['blocked'][] = ['otherLineage', 'notComparable', 'notNewer'];
+
+  return order.map((blocked) => {
+    const versions = [...new Set((offered || []).filter((o) => o.blocked === blocked && o.version !== currentVersion).map((o) => o.version))];
+
+    return {
+      blocked, count: versions.length, versions: versions.slice(0, show), more: Math.max(0, versions.length - show)
+    };
+  }).filter((g) => g.count > 0);
 }

@@ -1,5 +1,5 @@
 import {
-  CATALOG_PATH, catalogOptions, componentText, currentLineage, knownReleases, staleSources
+  CATALOG_PATH, catalogOptions, componentText, currentLineage, knownReleases, notOfferedGroups, staleSources
 } from '../catalog';
 import { ReleaseOption, offeredReleases } from '../release';
 
@@ -193,5 +193,28 @@ describe('the picker with the catalog', () => {
     expect(out['1.37.2-20.3']).toBe('offered');
     expect(out['1.38.0-1.1']).toBe('offered');
     expect(verdicts({ registry: 'registry.example/elsewhere/other-manifest', version: '1.37.0-1.1' })['1.37.2-20.3']).toBe('otherLineage');
+  });
+});
+
+describe('notOfferedGroups', () => {
+  const known = catalogOptions(catalogList.items);
+  const current = { registry: PUBLISHED, version: '1.37.2-20.3' };
+
+  it('gives one line per reason with the first versions and a count, and leaves the current release out', () => {
+    const offered = offeredReleases(known, current, currentLineage(current, known));
+
+    expect(notOfferedGroups(offered, current.version, 1)).toStrictEqual([
+      {
+        blocked: 'otherLineage', count: 1, versions: ['1.38.0-1.1'], more: 0
+      },
+      {
+        blocked: 'notNewer', count: 2, versions: ['1.37.1-17.1'], more: 1
+      },
+    ]);
+  });
+
+  it('is empty when everything known is offered or nothing is known', () => {
+    expect(notOfferedGroups(offeredReleases(known, null))).toStrictEqual([]);
+    expect(notOfferedGroups([])).toStrictEqual([]);
   });
 });

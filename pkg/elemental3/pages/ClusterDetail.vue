@@ -17,7 +17,9 @@ import {
   pickedText, runningByPool, upgradePhases, upgradeReadiness, upgradeState, SUC_CHART_SETTING, SUC_NAME, SUC_NAMESPACE
 } from '../lib/release';
 import { IMAGE_RELEASE_ANNOTATION, NODE_IMAGE_TYPE, errorText, harvesterBase } from '../lib/harvester';
-import { CATALOG_PATH, componentText, currentLineage, knownReleases } from '../lib/catalog';
+import {
+  CATALOG_PATH, componentText, currentLineage, knownReleases, notOfferedGroups
+} from '../lib/catalog';
 import { LIST_ROUTE, BLANK_CLUSTER } from '../product';
 
 const MGMT_API = '/k8s/clusters/local';
@@ -312,17 +314,11 @@ export default {
       return this.t(`elemental3.release.catalog.${ this.catalogState }`);
     },
 
-    /** Known releases that are not valid targets, with the reason. The current release itself is not listed. */
+    /** Known releases that are not valid targets: one line per reason. The current release itself is not listed. */
     notOffered() {
-      const current = this.currentRelease?.version;
-      const lines = this.offered
-        .filter((o) => !!o.blocked && o.version !== current)
-        .map((o) => this.t('elemental3.release.notOffered', { version: o.version, why: this.t(`elemental3.release.blocked.${ o.blocked }`) }));
-
-      const unique = [...new Set(lines)];
-
-      // A catalog can hold many old releases: the first five reasons, then a count
-      return unique.length > 6 ? [...unique.slice(0, 5), this.t('elemental3.release.notOfferedMore', { count: unique.length - 5 })] : unique;
+      return notOfferedGroups(this.offered, this.currentRelease?.version).map((g) => this.t(g.more ? 'elemental3.release.notOfferedMore' : 'elemental3.release.notOffered', {
+        count: g.count, versions: g.versions.join(', '), more: g.more, why: this.t(`elemental3.release.blocked.${ g.blocked }`)
+      }));
     },
 
     /** The picker's value as text: a reference chosen from the list, or what was typed */
