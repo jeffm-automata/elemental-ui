@@ -1371,7 +1371,7 @@ export default {
                       class="text-muted e3-small"
                       :data-testid="`elemental3-pool-${ p.role }-declared`"
                     >
-                      {{ t('elemental3.versions.declaredDiffers', { version: p.version }) }}
+                      {{ t('elemental3.versions.declaredShort', { version: p.version }) }}
                     </div>
                   </template>
                   <template v-else>
@@ -1428,6 +1428,13 @@ export default {
               </tr>
             </tbody>
           </table>
+          <p
+            v-if="pools.some((p) => p.drift)"
+            class="text-muted e3-small"
+            data-testid="elemental3-pools-declared-note"
+          >
+            {{ t('elemental3.versions.declaredDiffers') }}
+          </p>
           <Banner
             v-if="denied.scaleWorkers || denied.scaleControlPlane"
             color="warning"

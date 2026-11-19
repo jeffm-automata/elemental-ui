@@ -137,7 +137,8 @@ elemental3:
   versions:
     onNodes: '{version} on {count, plural, =1 {1 node} other {# nodes}}'
     declaredOnly: '{version} (as created; no node has reported yet)'
-    declaredDiffers: 'Cluster API still names {version}, the version the cluster was created with: an upgrade in place does not change it. A machine added now starts from the node image of that version.'
+    declaredShort: 'Cluster API declares {version}'
+    declaredDiffers: 'The version in front is what the nodes of a pool run. Cluster API keeps the version the cluster was created with, because an upgrade in place changes the nodes and not the Cluster API objects. A machine added now starts from the node image of the declared version.'
   pools:
     title: Machine Pools
     pool: Pool
