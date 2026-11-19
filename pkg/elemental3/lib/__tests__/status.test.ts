@@ -1,5 +1,6 @@
 import {
-  FAILURE_GRACE_SECONDS, NOT_YET_TIMEOUT_SECONDS, clusterEvents, clusterState, conditionRows, currentPhase, isFailure, isProvisioned, machineRows, poolRows, problems, progressPhases, severity
+  FAILURE_GRACE_SECONDS, NOT_YET_TIMEOUT_SECONDS, clusterEvents, clusterState, conditionRows, currentPhase, isFailure, isProvisioned, machineRows, poolRows, problems, progressPhases, severity,
+  brief
 } from '../status';
 
 const T = (type: string, extra: any = {}) => ({
@@ -347,5 +348,36 @@ describe('conditionRows and clusterEvents', () => {
     ];
 
     expect(clusterEvents(events, 'demo').map((e) => e.message)).toStrictEqual(['m2', 'm1']);
+  });
+});
+
+describe('a cluster Rancher has imported and cannot reach right now', () => {
+  const rc = (ready: string, message: string, imported: boolean) => ({
+    id:     'c-abcde',
+    status: {
+      version:    imported ? { gitVersion: 'v1.37.1+rke2r1' } : undefined,
+      conditions: [{ type: 'AgentDeployed', status: imported ? 'True' : 'Unknown' }, {
+        type: 'Ready', status: ready, message, lastUpdateTime: '2026-11-19T15:18:00Z'
+      }],
+    },
+  });
+  const long = `cluster health check failed: Failed to communicate with API server during namespace check: an error on the server ("${ '[+]ping ok\\n'.repeat(60) }readyz check failed") has prevented the request from succeeding`;
+
+  it('is told apart from an import that has not finished, and its message is cut to a readable length', () => {
+    const up = {
+      cluster: cluster([T('InfrastructureReady'), T('ControlPlaneInitialized')]), infra: infra(), controlPlane: cp(1, 1), machineDeployments: [md(1, 1)], machines: []
+    };
+    const lost = progressPhases({ ...up, rancherCluster: rc('False', long, true) } as any).find((p) => p.key === 'rancher');
+    const importing = progressPhases({ ...up, rancherCluster: rc('False', 'Waiting for API to be available', false) } as any).find((p) => p.key === 'rancher');
+
+    expect(lost).toMatchObject({ code: 'rancherLost' });
+    expect((lost as any).message.length).toBeLessThanOrEqual(241);
+    expect((lost as any).message).toContain('cluster health check failed');
+    expect(importing).toMatchObject({ code: 'rancherWaiting' });
+  });
+
+  it('brief() keeps short messages and replaces literal line breaks', () => {
+    expect(brief('a\\nb  c')).toBe('a b c');
+    expect(brief('x'.repeat(300))).toHaveLength(241);
   });
 });

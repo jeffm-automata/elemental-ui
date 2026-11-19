@@ -97,6 +97,8 @@ export default {
       confirmReplace:   '',
       timer:            null,
       lastRefresh:      '',
+      // When the workload cluster last answered
+      lastWorkloadRead: '',
     };
   },
 
@@ -171,7 +173,15 @@ export default {
     },
 
     state() {
-      return clusterState(this.objects);
+      const s = clusterState(this.objects);
+
+      // An upgrade restarts the control plane, and Rancher loses the cluster for minutes: that is not provisioning
+      return this.upgradeRunning && s !== 'deleting' ? 'upgrading' : s;
+    },
+
+    /** An upgrade runs and Rancher cannot reach the cluster right now (a control plane node is restarting) */
+    interrupted() {
+      return this.upgradeRunning && (!this.rancherReady || !!this.releaseError);
     },
 
     problemList() {
@@ -498,6 +508,7 @@ export default {
         const list = await this.workload('get', `/apis/${ RELEASE_API.group }/${ RELEASE_API.version }/${ RELEASE_API.resource }`);
 
         this.release = (list?.items || [])[0] || null;
+        this.lastWorkloadRead = new Date().toISOString();
         this.releaseError = '';
         this.releaseDenied = '';
       } catch (e) {
@@ -778,7 +789,7 @@ export default {
 
     stateColor(state) {
       return {
-        done: 'bg-success', ready: 'bg-success', applied: 'bg-success', active: 'bg-info', provisioning: 'bg-info', inProgress: 'bg-info', pending: 'bg-info', error: 'bg-error', failed: 'bg-error', deleting: 'bg-warning'
+        done: 'bg-success', ready: 'bg-success', applied: 'bg-success', active: 'bg-info', provisioning: 'bg-info', upgrading: 'bg-info', inProgress: 'bg-info', pending: 'bg-info', error: 'bg-error', failed: 'bg-error', deleting: 'bg-warning'
       }[state] || 'bg-darker';
     },
 
@@ -969,8 +980,13 @@ export default {
             v-else
             class="icon icon-error text-error"
           />
-          <b>{{ t(`elemental3.progress.waitingFor.${ waitingFor.key }`) }}</b>
-          <span v-if="waitingFor.message"> — {{ waitingFor.message }}</span>
+          <template v-if="upgradeRunning && waitingFor.key === 'rancher'">
+            <b>{{ t('elemental3.progress.duringUpgrade') }}</b>
+          </template>
+          <template v-else>
+            <b>{{ t(`elemental3.progress.waitingFor.${ waitingFor.key }`) }}</b>
+            <span v-if="waitingFor.message"> — {{ waitingFor.message }}</span>
+          </template>
         </p>
         <p
           v-else
@@ -1087,6 +1103,12 @@ export default {
           :label="t('elemental3.release.notVisible')"
         />
         <Banner
+          v-else-if="interrupted"
+          color="info"
+          data-testid="elemental3-release-interrupted"
+          :label="t('elemental3.release.interrupted', { time: short(lastWorkloadRead) })"
+        />
+        <Banner
           v-else-if="!rancherReady"
           color="info"
           :label="t('elemental3.release.notReady')"
@@ -1098,7 +1120,7 @@ export default {
           :label="t('elemental3.rights.missing', { right: releaseDenied }, true)"
         />
         <Banner
-          v-if="releaseError"
+          v-if="releaseError && !interrupted"
           color="error"
           data-testid="elemental3-release-error"
           :label="releaseError"

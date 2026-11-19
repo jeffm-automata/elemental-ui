@@ -215,6 +215,13 @@ function text(c?: Condition): string {
   return c.message || c.reason || '';
 }
 
+/** Rancher copies whole API server answers into its conditions; a page shows the first 240 characters. */
+export function brief(message: string, max = 240): string {
+  const m = (message || '').replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim();
+
+  return m.length > max ? `${ m.slice(0, max) }…` : m;
+}
+
 export function workerTotals(o: ClusterObjects): { desired: number; ready: number } {
   return (o.machineDeployments || []).reduce((acc, md) => ({
     desired: acc.desired + num(md.spec?.replicas),
@@ -285,12 +292,16 @@ export function progressPhases(o: ClusterObjects, now: number = Date.now()): Pha
   const rc = o.rancherCluster;
   const rcReady = isTrue(rc, 'Ready');
 
+  // Imported once (Rancher's agent was deployed and reported the cluster's version) and not ready now: Rancher
+  // has lost the cluster, which is what a restarting control plane looks like. Not an import in progress.
+  const rcLost = !!rc && !rcReady && isTrue(rc, 'AgentDeployed') && !!rc.status?.version?.gitVersion;
+
   out.push({
     key:     'rancher',
     state:   rc ? (rcReady ? 'done' : 'active') : 'unknown',
-    code:    rc ? (rcReady ? 'rancherDone' : 'rancherWaiting') : 'rancherNotVisible',
+    code:    rc ? (rcReady ? 'rancherDone' : (rcLost ? 'rancherLost' : 'rancherWaiting')) : 'rancherNotVisible',
     params:  { id: rc?.id || rc?.metadata?.name || '' },
-    message: rc && !rcReady ? text(firstPending(rc, ['Ready', 'Connected'])) : '',
+    message: rc && !rcReady ? brief(text(firstPending(rc, ['Ready', 'Connected']))) : '',
   });
 
   // Order: only the first unfinished phase is active

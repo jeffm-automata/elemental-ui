@@ -62,6 +62,7 @@ elemental3:
   state:
     ready: Ready
     provisioning: Provisioning
+    upgrading: Upgrading
     error: Error
     deleting: Deleting
   endpoint:
@@ -97,6 +98,7 @@ elemental3:
   progress:
     title: Provisioning
     provisioned: 'Provisioned: every step this page can read is done.'
+    duringUpgrade: 'An upgrade is running (see Elemental Release below). Rancher loses the cluster while a control plane node restarts and finds it again by itself.'
     note: 'This page only shows what the objects on the management cluster report (refreshed every 10 seconds). The work is done by Cluster API, the RKE2 and Harvester providers, and Rancher Turtles.'
     waitingFor:
       written: Waiting for the cluster object
@@ -130,6 +132,7 @@ elemental3:
       workersDone: '{ready} of {desired} worker machines ready'
       rancherDone: 'Rancher cluster {id} is ready'
       rancherWaiting: 'Rancher cluster {id} exists and is not ready yet'
+      rancherLost: 'Rancher cluster {id} is imported; Rancher cannot reach it right now'
       rancherNotVisible: 'No Rancher cluster for this cluster is visible to you. Rancher Turtles imports the cluster once the control plane is up; the imported cluster belongs to Rancher, and you see it only as a member.'
   versions:
     onNodes: '{version} on {count, plural, =1 {1 node} other {# nodes}}'
@@ -220,6 +223,7 @@ elemental3:
     afterImport: 'Upgrades become available here once the machines are up and Rancher has imported the cluster.'
     notVisible: 'The release of this cluster cannot be read or changed by your account: the Release object lives in the workload cluster and is reached through Rancher, and no imported Rancher cluster for this cluster is visible to you. Missing: membership of the imported Rancher cluster with get, list, create and patch on releases.lifecycle.suse.com.'
     notReady: 'The release can be read once Rancher has imported the cluster and it is ready.'
+    interrupted: 'The cluster does not answer through Rancher right now. During an upgrade that is expected while a control plane node restarts. The progress below is the last state this page read ({time}); it continues by itself.'
     noLifecycleManager: 'The cluster has no Release API: the Elemental Lifecycle Manager is not installed in it.'
     progressTitle: 'Release {version}'
     state:
