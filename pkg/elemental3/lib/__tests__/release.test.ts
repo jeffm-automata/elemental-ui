@@ -1,5 +1,6 @@
 import {
-  appliedVersion, buildRelease, compareVersions, nodeFacts, offeredReleases, parseManifestRef, preflight, preflightPassed, upgradePhases, upgradeState
+  appliedVersion, buildRelease, compareVersions, nodeFacts, offeredReleases, parseManifestRef, preflight, preflightPassed, runningByPool, runningKubernetes,
+  upgradePhases, upgradeReadiness, upgradeState
 } from '../release';
 
 const c = (type: string, status: string, reason: string, message = '') => ({
@@ -234,5 +235,143 @@ describe('preflight', () => {
     expect(nodeFacts([node('a', true, true)])[0]).toStrictEqual({
       name: 'a', ready: true, cordoned: true, kubelet: 'v1.37.1+rke2r1', osImage: 'SUSE Linux Enterprise Server 16.1', kernel: '6.12.0-160100.8-default', roles: 'control-plane, etcd'
     });
+  });
+});
+
+describe('running Kubernetes versions', () => {
+  it('counts nodes per version, newest first, and ignores nodes that reported nothing', () => {
+    expect(runningKubernetes(['v1.37.1+rke2r1', 'v1.37.2+rke2r1', '', 'v1.37.1+rke2r1'])).toEqual([{ version: 'v1.37.2+rke2r1', nodes: 1 }, { version: 'v1.37.1+rke2r1', nodes: 2 }]);
+    expect(runningKubernetes([])).toEqual([]);
+  });
+
+  const machines = [
+    {
+      pool: 'c1-cp', node: 'c1-cp-a', kubelet: 'v1.37.1+rke2r1'
+    },
+    {
+      pool: 'c1-md-0', node: 'c1-md-0-a', kubelet: 'v1.37.1+rke2r1'
+    },
+    {
+      pool: 'c1-md-0', node: '', kubelet: ''
+    },
+  ];
+
+  it('uses the version Cluster API copied from the node when the workload cluster cannot be read', () => {
+    const r = runningByPool(machines, null);
+
+    expect(r.all).toEqual([{ version: 'v1.37.1+rke2r1', nodes: 2 }]);
+    expect(r.pools['c1-md-0']).toEqual([{ version: 'v1.37.1+rke2r1', nodes: 1 }]);
+  });
+
+  it('prefers what the node itself reports: after an upgrade in place the header follows the nodes, not Cluster API', () => {
+    const r = runningByPool(machines, { 'c1-cp-a': 'v1.37.2+rke2r1', 'c1-md-0-a': 'v1.37.1+rke2r1' });
+
+    expect(r.all).toEqual([{ version: 'v1.37.2+rke2r1', nodes: 1 }, { version: 'v1.37.1+rke2r1', nodes: 1 }]);
+    expect(r.pools['c1-cp']).toEqual([{ version: 'v1.37.2+rke2r1', nodes: 1 }]);
+  });
+
+  it('falls back to the nodes alone when the user cannot list machines, and to nothing when neither is known', () => {
+    expect(runningByPool([], { a: 'v1.37.2+rke2r1', b: 'v1.37.2+rke2r1' }).all).toEqual([{ version: 'v1.37.2+rke2r1', nodes: 2 }]);
+    expect(runningByPool([], null)).toEqual({ all: [], pools: {} });
+  });
+});
+
+/**
+ * Ready for an upgrade. The objects are cut down from what the tenant read on the lab cluster e3p-uic-c0 on
+ * 2026-11-19 (lab/ui-carry/evidence/recon/takeover.jsonl in the parity repository): before and after Rancher
+ * replaced the upgrade controller the release had installed.
+ */
+describe('upgradeReadiness', () => {
+  const app = (version: string, state = 'deployed') => ({ spec: { chart: { metadata: { name: 'system-upgrade-controller', version } }, info: { status: state } }, status: { summary: { state } } });
+  const deployment = (image: string, generation: number, st: any) => ({
+    metadata: { generation }, spec: { replicas: 1, template: { spec: { containers: [{ image }] } } }, status: st
+  });
+  const up = {
+    observedGeneration: 2, replicas: 1, updatedReplicas: 1, availableReplicas: 1
+  };
+  const plan = (name: string, complete: string, applying?: string[]) => ({ metadata: { name }, status: { applying, conditions: [{ type: 'Complete', status: complete }, { type: 'Validated', status: 'True' }] } });
+  const settled = {
+    wantedChart: '110.0.0',
+    app:         app('110.0.0'),
+    deployment:  deployment('rancher/system-upgrade-controller:v0.20.1', 2, up),
+    plans:       [plan('system-agent-upgrader', 'True'), plan('system-agent-upgrader-windows', 'True')],
+  };
+  const byKey = (r: any, key: string) => r.checks.find((c: any) => c.key === key);
+
+  it('is ready when the chart is the one of Rancher\'s setting, the controller is rolled out and no plan is being applied', () => {
+    const r = upgradeReadiness(settled);
+
+    expect(r.state).toBe('ready');
+    expect(r.checks.map((c) => c.passed)).toEqual([true, true, true]);
+  });
+
+  it('waits while the controller is still the one the release installed (the state right after the import)', () => {
+    const r = upgradeReadiness({
+      ...settled, app: app('109.0.2'), deployment: deployment('rancher/system-upgrade-controller:v0.19.1', 1, { ...up, observedGeneration: 1 })
+    });
+
+    expect(r.state).toBe('waiting');
+    expect(byKey(r, 'chart')).toMatchObject({
+      passed: false, code: 'other', params: { have: '109.0.2', want: '110.0.0' }
+    });
+    expect(byKey(r, 'controller').passed).toBe(true);
+  });
+
+  it('waits while no controller is installed at all, and while Helm is still installing Rancher\'s chart', () => {
+    expect(upgradeReadiness({
+      ...settled, app: null, deployment: null, plans: []
+    }).checks.map((c) => `${ c.key }:${ c.code }`)).toEqual(['chart:missing', 'controller:missing', 'plans:ok']);
+    expect(byKey(upgradeReadiness({ ...settled, app: app('110.0.0', 'pending-upgrade') }), 'chart')).toMatchObject({ passed: false, code: 'notDeployed' });
+  });
+
+  it('waits while the new controller is being rolled out', () => {
+    const r = upgradeReadiness({
+      ...settled,
+      deployment: deployment('rancher/system-upgrade-controller:v0.20.1', 2, {
+        observedGeneration: 2, replicas: 2, updatedReplicas: 1, availableReplicas: 1
+      })
+    });
+
+    expect(r.state).toBe('waiting');
+    expect(byKey(r, 'controller')).toMatchObject({ passed: false, code: 'rollingOut' });
+    expect(byKey(upgradeReadiness({ ...settled, deployment: deployment('x', 3, up) }), 'controller').passed).toBe(false);
+  });
+
+  it('waits while Rancher\'s node agent plan is being applied, and names the plan and its nodes', () => {
+    const r = upgradeReadiness({ ...settled, plans: [plan('system-agent-upgrader', 'False', ['c0-cp-a', 'c0-md-0-b']), plan('system-agent-upgrader-windows', 'True')] });
+
+    expect(r.state).toBe('waiting');
+    expect(byKey(r, 'plans')).toMatchObject({ passed: false, params: { plans: 'system-agent-upgrader (c0-cp-a, c0-md-0-b)' } });
+  });
+
+  it('does not wait for a plan the controller has not evaluated yet when nothing else is open (a plan without conditions matches no rule)', () => {
+    expect(byKey(upgradeReadiness({ ...settled, plans: [{ metadata: { name: 'new' } }] }), 'plans').passed).toBe(true);
+  });
+
+  it('is unknown, not waiting, when something could not be read; a failed check still wins', () => {
+    expect(upgradeReadiness({ ...settled, wantedChart: undefined }).state).toBe('unknown');
+    expect(upgradeReadiness({ ...settled, plans: undefined }).state).toBe('unknown');
+    expect(upgradeReadiness({
+      ...settled, deployment: undefined, app: app('109.0.2')
+    }).state).toBe('waiting');
+  });
+
+  it('passes the chart check when Rancher installs no controller of its own (empty setting)', () => {
+    expect(byKey(upgradeReadiness({
+      ...settled, wantedChart: '', app: app('109.0.2')
+    }), 'chart')).toMatchObject({ passed: true, code: 'notManaged' });
+  });
+
+  it('blocks the pre-flight while waiting, and only warns when unknown', () => {
+    const nodes = nodeFacts([{ metadata: { name: 'a' }, status: { conditions: [{ type: 'Ready', status: 'True' }], nodeInfo: {} } }]);
+    const target = { registry: 'r/rke2-manifest', version: '1.37.2-20.3' };
+    const checks = (state: any) => preflight(nodes, null, target, '', '1.37.1-17.1', state);
+
+    expect(checks('waiting')[0]).toMatchObject({ key: 'settled', passed: false });
+    expect(preflightPassed(checks('waiting'))).toBe(false);
+    expect(preflightPassed(checks('ready'))).toBe(true);
+    expect(checks('unknown')[0].passed).toBeNull();
+    expect(preflightPassed(checks('unknown'))).toBe(true);
+    expect(preflight(nodes, null, target, '', '1.37.1-17.1').map((c) => c.key)).not.toContain('settled');
   });
 });

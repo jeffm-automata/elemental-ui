@@ -131,6 +131,10 @@ elemental3:
       rancherDone: 'Rancher cluster {id} is ready'
       rancherWaiting: 'Rancher cluster {id} exists and is not ready yet'
       rancherNotVisible: 'No Rancher cluster for this cluster is visible to you. Rancher Turtles imports the cluster once the control plane is up; the imported cluster belongs to Rancher, and you see it only as a member.'
+  versions:
+    onNodes: '{version} on {count, plural, =1 {1 node} other {# nodes}}'
+    declaredOnly: '{version} (as created; no node has reported yet)'
+    declaredDiffers: 'Cluster API still names {version}, the version the cluster was created with: an upgrade in place does not change it. A machine added now starts from the node image of that version.'
   pools:
     title: Machine Pools
     pool: Pool
@@ -194,6 +198,7 @@ elemental3:
     targetPlaceholder: 'Select a release, or type a version'
     targetInvalid: 'Type a version such as 1.37.2-20.3. When the registry of the current release is not known, type the whole manifest reference: registry/path/manifest:version.'
     option: '{version} ({source})'
+    optionFrom: '{version} from {registry} ({source})'
     source:
       nodeImage: node image built
       image: node image in Harvester
@@ -225,9 +230,38 @@ elemental3:
       HelmChartsUpgraded: Applications
     rollbackNote: 'Going back to an earlier release is not offered: the Lifecycle Manager refuses a lower version. A failed OS update is rolled back on the node by its snapshot; the Release API does not report snapshots, so this page cannot show them.'
     unverifiedImage: 'Nothing says which Elemental release or Kubernetes version this image contains (it has no release annotations and was not delivered by the image build operator). It may not be an Elemental 3 node image at all. If the version entered here is not the one in the image, the cluster will not come up or will report a wrong version.'
+  readiness:
+    title:
+      ready: Ready for an upgrade
+      waiting: 'Not ready for an upgrade yet: Rancher is still setting up the imported cluster'
+      unknown: Could not check whether the cluster is ready for an upgrade
+    explain:
+      waiting: 'After the import Rancher replaces the upgrade controller in the cluster with its own and installs its node agent. This needs no action and usually takes 5 to 35 minutes. An upgrade started earlier fails on every node until Rancher is done, so Upgrade stays disabled until the checks below pass. This page checks again every 10 seconds.'
+      unknown: 'One of the checks below could not be read with your account. If the cluster was imported less than about 35 minutes ago, Rancher may still be replacing its upgrade controller, and an upgrade started now can fail on every node until that is done. Upgrade is not disabled.'
+    chart:
+      ok: 'The upgrade controller is the one Rancher installs (chart {have})'
+      notManaged: 'Rancher installs no upgrade controller of its own on this cluster; the one of the release stays (chart {have})'
+      other: 'The upgrade controller is still the one the cluster was installed with (chart {have}); Rancher replaces it with chart {want}'
+      notDeployed: 'Rancher is installing its upgrade controller (chart {want}, state: {state})'
+      missing: 'No upgrade controller is installed yet; Rancher installs chart {want}'
+      unread: 'The Helm release of the upgrade controller could not be read'
+      noSetting: 'Rancher''s setting for its upgrade controller chart could not be read'
+    controller:
+      ok: 'The upgrade controller is running ({image})'
+      rollingOut: 'The upgrade controller is being rolled out ({ready} of {replicas} available, {image})'
+      missing: 'The upgrade controller is not deployed'
+      unread: 'The upgrade controller''s Deployment could not be read'
+    plans:
+      ok: 'Rancher''s node agent is installed: no plan of the upgrade controller is being applied'
+      applying: 'Still being applied to nodes: {plans}'
+      unread: 'The plans of the upgrade controller could not be read'
   preflight:
     title: 'Checks before upgrading to {version}'
     note: 'One Release object is written for {manifest}. The Lifecycle Manager in the cluster then upgrades the OS, Kubernetes and the applications, node by node.'
+    settled:
+      ok: 'Rancher has finished setting up the imported cluster (see "Ready for an upgrade" above)'
+      failed: 'Rancher is still setting up the imported cluster (see "Not ready for an upgrade yet" above)'
+      unknown: 'Whether Rancher has finished setting up the imported cluster could not be checked'
     nodesReady:
       ok: 'All {count} nodes are Ready'
       failed: 'Nodes not Ready: {nodes}'

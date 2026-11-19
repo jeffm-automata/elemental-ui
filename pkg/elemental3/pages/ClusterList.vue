@@ -3,10 +3,10 @@ import Loading from '@shell/components/Loading';
 import { Banner } from '@components/Banner';
 import { MANAGEMENT, NAMESPACE } from '@shell/config/types';
 import {
-  API, CLUSTER_NAME_LABEL, RELEASE_ANNOTATION, collectionPath, rightText
+  API, READ_API, CLUSTER_NAME_LABEL, RELEASE_ANNOTATION, collectionPath, rightText
 } from '../lib/objects';
 import { clusterState, poolRows } from '../lib/status';
-import { parseManifestRef } from '../lib/release';
+import { RELEASE_API, appliedVersion, parseManifestRef, runningKubernetes } from '../lib/release';
 import { errorText } from '../lib/harvester';
 import { Elemental3HarvesterProvisioner } from '../provisioner';
 import { DETAIL_ROUTE, BLANK_CLUSTER } from '../product';
@@ -44,6 +44,8 @@ export default {
     return {
       mgmtClusters: [],
       rows:         [],
+      // Release the Lifecycle Manager reports as applied, per "namespace/name"; read from each workload cluster
+      applied:      {},
       scope:        '',
       error:        '',
       timer:        null,
@@ -113,10 +115,12 @@ export default {
       clusters = clusters.filter((c) => c.spec?.controlPlaneRef?.kind === API.controlPlane.kind);
 
       const scopeNs = namespaces ? [...new Set(clusters.map((c) => c.metadata.namespace))] : null;
-      const [cps, mds, infras] = await Promise.all([
+      const [cps, mds, infras, machines] = await Promise.all([
         this.listAll(API.controlPlane, scopeNs).catch(() => []),
         this.listAll(API.md, scopeNs).catch(() => []),
         this.listAll(API.infraCluster, scopeNs).catch(() => []),
+        // What the nodes run (Cluster API copies it into the Machine status). Not listable for every user.
+        this.listAll(READ_API.machine, scopeNs || [...new Set(clusters.map((c) => c.metadata.namespace))]).catch(() => []),
       ]);
       const same = (o, ns, name) => o.metadata?.namespace === ns && o.metadata?.name === name;
 
@@ -132,6 +136,9 @@ export default {
         };
         const pools = poolRows(objects);
         const cp = pools.find((p) => p.role === 'controlPlane');
+        const kubelets = machines.filter((m) => m.metadata?.namespace === ns && m.metadata?.labels?.[CLUSTER_NAME_LABEL] === name).map((m) => m.status?.nodeInfo?.kubeletVersion || '');
+        const running = runningKubernetes(kubelets);
+        const created = parseManifestRef(c.metadata?.annotations?.[RELEASE_ANNOTATION] || '')?.version || '';
         const workers = pools.filter((p) => p.role === 'worker').reduce((acc, p) => ({ ready: acc.ready + p.ready, desired: acc.desired + p.desired }), { ready: 0, desired: 0 });
 
         return {
@@ -141,9 +148,12 @@ export default {
           state:        clusterState(objects),
           controlPlane: cp ? `${ cp.ready }/${ cp.desired }` : '',
           workers:      `${ workers.ready }/${ workers.desired }`,
-          version:      cp?.version || '',
-          release:      parseManifestRef(c.metadata?.annotations?.[RELEASE_ANNOTATION] || '')?.version || '',
+          // What runs: the nodes' versions and the release the Lifecycle Manager applied. The Cluster API
+          // version and the release annotation only say what the cluster was created with.
+          version:      running.length ? running.map((r) => r.version).join(', ') : (cp?.version || ''),
+          release:      this.applied[`${ ns }/${ name }`] || created,
           rancher:      objects.rancherCluster?.id || '',
+          rancherReady: (objects.rancherCluster?.status?.conditions || []).some((x) => x.type === 'Ready' && x.status === 'True'),
           created:      c.metadata?.creationTimestamp || '',
           route:        {
             name:   DETAIL_ROUTE,
@@ -153,6 +163,27 @@ export default {
           },
         };
       }).sort((a, b) => a.key.localeCompare(b.key));
+      this.loadApplied();
+    },
+
+    /** The applied release of every cluster that is reachable through Rancher; the next refresh shows it. */
+    async loadApplied() {
+      const found = {};
+
+      await Promise.allSettled(this.rows.filter((r) => r.rancher && r.rancherReady).map(async(r) => {
+        const list = await this.$store.dispatch('management/request', { url: `/k8s/clusters/${ r.rancher }/apis/${ RELEASE_API.group }/${ RELEASE_API.version }/${ RELEASE_API.resource }` });
+        const v = appliedVersion((list?.items || [])[0]);
+
+        if (v) {
+          found[r.key] = v;
+        }
+      }));
+      const changed = JSON.stringify(found) !== JSON.stringify(this.applied);
+
+      this.applied = found;
+      if (changed) {
+        this.rows = this.rows.map((r) => (found[r.key] ? { ...r, release: found[r.key] } : r));
+      }
     },
 
     stateColor(state) {

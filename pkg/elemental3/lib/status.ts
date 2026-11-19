@@ -86,7 +86,10 @@ export interface MachineRow {
   role: 'controlPlane' | 'worker';
   phase: string;
   node: string;
+  /** Kubernetes version Cluster API declares for the machine (what it was created with) */
   version: string;
+  /** Kubernetes version the machine's node runs, as Cluster API copied it from the node; '' when not reported */
+  kubelet: string;
   created: string;
   message: string;
 }
@@ -435,6 +438,7 @@ export function machineRows(machines: any[] | null | undefined, now: number = Da
       phase:   m.status?.phase || '',
       node:    m.status?.nodeRef?.name || '',
       version: m.spec?.version || '',
+      kubelet: m.status?.nodeInfo?.kubeletVersion || '',
       created: m.metadata?.creationTimestamp || '',
       message: m.status?.failureMessage || (m.status?.phase === 'Running' ? '' : text(pending)),
     };

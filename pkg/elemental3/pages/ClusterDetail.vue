@@ -14,7 +14,7 @@ import {
 } from '../lib/status';
 import {
   RELEASE_API, appliedVersion, buildRelease, manifestRef, nodeFacts, offeredReleases, parseManifestRef, preflight, preflightPassed,
-  upgradePhases, upgradeState
+  runningByPool, upgradePhases, upgradeReadiness, upgradeState, SUC_CHART_SETTING, SUC_NAME, SUC_NAMESPACE
 } from '../lib/release';
 import { IMAGE_RELEASE_ANNOTATION, NODE_IMAGE_TYPE, errorText, harvesterBase } from '../lib/harvester';
 import { LIST_ROUTE, BLANK_CLUSTER } from '../product';
@@ -72,11 +72,16 @@ export default {
         scaleWorkers: false, scaleControlPlane: false, deleteCluster: false, replaceMachine: false
       },
       // Workload cluster, through Rancher's cluster proxy
-      nodes:            null,
-      release:          null,
-      releaseError:     '',
-      releaseDenied:    '',
-      knownReleases:    [],
+      nodes:          null,
+      release:        null,
+      releaseError:   '',
+      releaseDenied:  '',
+      knownReleases:  [],
+      // What says whether Rancher's changes after the import are finished (lib/release.ts, upgradeReadiness)
+      readinessFacts: {
+        wantedChart: undefined, app: undefined, deployment: undefined, plans: undefined
+      },
+      readinessRead:    0,
       targetKey:        '',
       dryRunError:      undefined,
       dryRunFor:        '',
@@ -170,12 +175,35 @@ export default {
       return problems(this.objects);
     },
 
+    /**
+     * Kubernetes versions the nodes really run, per pool and for the cluster. The Cluster API objects keep
+     * the version the cluster was created with: an in-place upgrade does not change them.
+     */
+    running() {
+      const nodeKubelet = this.nodeList ? this.nodeList.reduce((acc, n) => ({ ...acc, [n.name]: n.kubelet }), {}) : null;
+
+      return runningByPool(this.machineList, nodeKubelet);
+    },
+
+    /** "v1.37.2+rke2r1", or "v1.37.2+rke2r1 on 1 node, v1.37.1+rke2r1 on 1 node" while an upgrade is under way */
+    runningText() {
+      return this.versionsText(this.running.all);
+    },
+
+    declaredVersion() {
+      return this.controlPlane?.spec?.version || '';
+    },
+
     pools() {
       return poolRows(this.objects).map((p) => {
         const t = this.templates[p.templateName]?.spec?.template?.spec || {};
+        const running = this.running.pools[p.name] || [];
 
         return {
           ...p,
+          running:  this.versionsText(running),
+          // The declared version is worth a line of its own only when it is not what runs
+          drift:    running.length > 0 && running.some((r) => r.version !== p.version),
           cpu:      t.cpu || '',
           memory:   t.memory || '',
           disk:     t.volumes?.[0]?.volumeSize || '',
@@ -241,9 +269,14 @@ export default {
     },
 
     releaseOptions() {
+      const here = this.currentRelease?.registry || '';
+
+      // The repository is named only when the release comes from another one than the current release
       return this.offered.filter((o) => !o.blocked).map((o) => ({
         value: manifestRef(o),
-        label: this.t('elemental3.release.option', { version: o.version, source: this.t(`elemental3.release.source.${ o.source }`) }),
+        label: this.t(o.registry === here || !here ? 'elemental3.release.option' : 'elemental3.release.optionFrom', {
+          version: o.version, registry: o.registry, source: this.t(`elemental3.release.source.${ o.source }`)
+        }),
       }));
     },
 
@@ -278,8 +311,20 @@ export default {
       return !!`${ this.targetKey || '' }`.trim() && !this.target;
     },
 
+    /**
+     * Ready for an upgrade: Rancher has finished changing the imported cluster. null while the workload
+     * cluster cannot be read at all (not imported yet, or not visible), and while an upgrade runs.
+     */
+    readiness() {
+      if (!this.rancherReady || !this.readinessRead || this.upgradeRunning) {
+        return null;
+      }
+
+      return upgradeReadiness(this.readinessFacts);
+    },
+
     preflightChecks() {
-      return preflight(this.nodeList, this.release, this.target, this.dryRunFor === this.targetKey ? this.dryRunError : undefined, this.currentRelease?.version);
+      return preflight(this.nodeList, this.release, this.target, this.dryRunFor === this.targetKey ? this.dryRunError : undefined, this.currentRelease?.version, this.readiness ? this.readiness.state : 'unknown');
     },
 
     canUpgrade() {
@@ -462,6 +507,38 @@ export default {
           this.releaseError = errorText(e);
         }
       }
+      // While not ready this is read with every refresh; once ready, once a minute
+      if (!this.upgradeRunning && (!this.readiness || this.readiness.state !== 'ready' || Date.now() - this.readinessRead > 60000)) {
+        await this.loadReadiness();
+      }
+    },
+
+    /**
+     * Reads what says whether Rancher is done with the imported cluster: Rancher's setting for the chart of
+     * its upgrade controller (management side), and in the workload cluster the controller's Helm release,
+     * its Deployment and the Plans in its namespace. undefined = could not be read, null = does not exist.
+     */
+    async loadReadiness() {
+      const read = async(fn, pickValue) => {
+        try {
+          return pickValue(await fn());
+        } catch (e) {
+          return httpStatus(e) === 404 ? null : undefined;
+        }
+      };
+      const ns = `namespaces/${ SUC_NAMESPACE }`;
+      const [wantedChart, app, deployment, plans] = await Promise.all([
+        read(() => this.request('get', `/v1/management.cattle.io.settings/${ SUC_CHART_SETTING }`), (r) => r?.value || r?.default || ''),
+        read(() => this.workload('get', `/apis/catalog.cattle.io/v1/${ ns }/apps/${ SUC_NAME }`), (r) => r),
+        read(() => this.workload('get', `/apis/apps/v1/${ ns }/deployments/${ SUC_NAME }`), (r) => r),
+        read(() => this.workload('get', `/apis/upgrade.cattle.io/v1/${ ns }/plans`), (r) => r?.items || []),
+      ]);
+
+      this.readinessFacts = {
+        // A plan list that does not exist as an API means the controller's CRD is not there yet
+        wantedChart, app, deployment, plans: plans === null ? [] : plans
+      };
+      this.readinessRead = Date.now();
     },
 
     async review(base, api, verb, name) {
@@ -668,6 +745,14 @@ export default {
       return passed === true ? 'icon-checkmark text-success' : (passed === false ? 'icon-error text-error' : 'icon-info text-muted');
     },
 
+    versionsText(list) {
+      if (!list || !list.length) {
+        return '';
+      }
+
+      return list.length === 1 ? list[0].version : list.map((r) => this.t('elemental3.versions.onNodes', { version: r.version, count: r.nodes })).join(', ');
+    },
+
     short(ts) {
       return ts ? `${ ts }`.replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '';
     },
@@ -707,8 +792,20 @@ export default {
           class="text-muted"
         >
           {{ t('elemental3.detail.endpoint') }}: <span data-testid="elemental3-detail-endpoint">{{ endpoint || t('elemental3.detail.endpointPending') }}</span>
-          <template v-if="controlPlane">
-            &nbsp;·&nbsp; {{ t('elemental3.fields.kubernetesVersion') }}: {{ controlPlane.spec.version }}
+          <template v-if="currentRelease">
+            &nbsp;·&nbsp; {{ t('elemental3.release.title') }}: <span data-testid="elemental3-detail-release">{{ currentRelease.version }}</span>
+          </template>
+          <template v-if="runningText">
+            &nbsp;·&nbsp; {{ t('elemental3.fields.kubernetesVersion') }}: <span
+              data-testid="elemental3-detail-kubernetes"
+              data-source="nodes"
+            >{{ runningText }}</span>
+          </template>
+          <template v-else-if="declaredVersion">
+            &nbsp;·&nbsp; {{ t('elemental3.fields.kubernetesVersion') }}: <span
+              data-testid="elemental3-detail-kubernetes"
+              data-source="declared"
+            >{{ t('elemental3.versions.declaredOnly', { version: declaredVersion }) }}</span>
           </template>
           <template v-if="lastRefresh">
             &nbsp;·&nbsp; {{ t('elemental3.detail.refreshed', { time: short(lastRefresh) }) }}
@@ -972,6 +1069,47 @@ export default {
         />
 
         <div
+          v-if="readiness"
+          class="e3-readiness mb-10"
+          :class="`e3-readiness-${ readiness.state }`"
+          data-testid="elemental3-upgrade-readiness"
+          :data-state="readiness.state"
+        >
+          <div class="e3-readiness-title">
+            <i
+              v-if="readiness.state === 'waiting'"
+              class="icon icon-spinner icon-spin"
+            />
+            <i
+              v-else
+              class="icon"
+              :class="readiness.state === 'ready' ? 'icon-checkmark text-success' : 'icon-warning text-warning'"
+            />
+            <b>{{ t(`elemental3.readiness.title.${ readiness.state }`) }}</b>
+          </div>
+          <p
+            v-if="readiness.state !== 'ready'"
+            class="mb-5"
+          >
+            {{ t(`elemental3.readiness.explain.${ readiness.state }`) }}
+          </p>
+          <ul class="e3-checks">
+            <li
+              v-for="c in readiness.checks"
+              :key="c.key"
+              :data-testid="`elemental3-readiness-${ c.key }`"
+              :data-passed="`${ c.passed }`"
+            >
+              <i
+                class="icon"
+                :class="checkIcon(c.passed)"
+              />
+              {{ t(`elemental3.readiness.${ c.key }.${ c.code }`, c.params, true) }}
+            </li>
+          </ul>
+        </div>
+
+        <div
           v-if="target"
           class="mb-10"
           data-testid="elemental3-preflight"
@@ -1108,7 +1246,21 @@ export default {
                     {{ p.cpu }} CPU · {{ p.memory }} · {{ p.disk }}
                   </template>
                 </td>
-                <td>{{ p.version }}</td>
+                <td :data-testid="`elemental3-pool-${ p.role }-version`">
+                  <template v-if="p.running">
+                    {{ p.running }}
+                    <div
+                      v-if="p.drift"
+                      class="text-muted e3-small"
+                      :data-testid="`elemental3-pool-${ p.role }-declared`"
+                    >
+                      {{ t('elemental3.versions.declaredDiffers', { version: p.version }) }}
+                    </div>
+                  </template>
+                  <template v-else>
+                    {{ t('elemental3.versions.declaredOnly', { version: p.version }) }}
+                  </template>
+                </td>
                 <td>
                   <button
                     type="button"
@@ -1389,6 +1541,29 @@ export default {
 
     li {
       padding: 2px 0;
+    }
+  }
+  .e3-readiness {
+    border-left: 4px solid var(--border);
+    padding: 6px 12px;
+
+    &.e3-readiness-waiting {
+      border-left-color: var(--info);
+      background: var(--info-banner-bg);
+    }
+    &.e3-readiness-unknown {
+      border-left-color: var(--warning);
+      background: var(--warning-banner-bg);
+    }
+    &.e3-readiness-ready {
+      border-left-color: var(--success);
+    }
+    .e3-readiness-title {
+      font-size: 15px;
+      margin-bottom: 4px;
+    }
+    .e3-checks {
+      margin-bottom: 0;
     }
   }
   .e3-version {

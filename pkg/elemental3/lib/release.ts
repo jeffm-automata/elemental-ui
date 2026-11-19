@@ -289,7 +289,7 @@ export function nodeFacts(nodes: any[]): NodeFacts[] {
 }
 
 export interface PreflightCheck {
-  key: 'nodesReady' | 'noneCordoned' | 'noUpgradeRunning' | 'newer' | 'accepted';
+  key: 'settled' | 'nodesReady' | 'noneCordoned' | 'noUpgradeRunning' | 'newer' | 'accepted';
   /** null: could not be checked */
   passed: boolean | null;
   params: Record<string, any>;
@@ -300,8 +300,9 @@ export interface PreflightCheck {
  * API server's answer to a server-side dry run of the very object that would be written (the Lifecycle
  * Manager's admission webhook validates it): undefined = not run yet, '' = accepted.
  * `currentVersion` is the release the cluster was created from, used while no Release exists.
+ * `readiness` is the state of upgradeReadiness(): 'waiting' blocks the upgrade, 'unknown' does not.
  */
-export function preflight(nodes: NodeFacts[] | null, release: any, target: ReleaseRef | null, dryRunError?: string, currentVersion?: string): PreflightCheck[] {
+export function preflight(nodes: NodeFacts[] | null, release: any, target: ReleaseRef | null, dryRunError?: string, currentVersion?: string, readiness?: ReadinessState): PreflightCheck[] {
   const notReady = (nodes || []).filter((n) => !n.ready).map((n) => n.name);
   const cordoned = (nodes || []).filter((n) => n.cordoned).map((n) => n.name);
   const state = upgradeState(release);
@@ -309,7 +310,13 @@ export function preflight(nodes: NodeFacts[] | null, release: any, target: Relea
   const current = appliedVersion(release) || release?.spec?.version || currentVersion || '';
   const cmp = target && current ? compareVersions(target.version, current) : NaN;
 
+  // Rancher's changes after the import are finished (upgradeReadiness). Left out when the caller does not say.
+  const settled: PreflightCheck[] = readiness === undefined ? [] : [{
+    key: 'settled', passed: readiness === 'ready' ? true : (readiness === 'waiting' ? false : null), params: {}
+  }];
+
   return [
+    ...settled,
     {
       key: 'nodesReady', passed: nodes ? notReady.length === 0 && nodes.length > 0 : null, params: { nodes: notReady.join(', '), count: (nodes || []).length }
     },
@@ -331,4 +338,199 @@ export function preflight(nodes: NodeFacts[] | null, release: any, target: Relea
 /** The upgrade may be started when nothing failed and the dry run was accepted. Unknown checks do not block. */
 export function preflightPassed(checks: PreflightCheck[]): boolean {
   return checks.every((c) => c.passed !== false) && checks.find((c) => c.key === 'accepted')?.passed === true;
+}
+
+export interface RunningVersion {
+  version: string;
+  /** How many nodes run it */
+  nodes: number;
+}
+
+/** Distinct Kubernetes versions out of one kubelet version per node, newest first. Empty entries are ignored. */
+export function runningKubernetes(kubelets: string[]): RunningVersion[] {
+  const count: Record<string, number> = {};
+
+  (kubelets || []).filter((k) => !!k).forEach((k) => {
+    count[k] = (count[k] || 0) + 1;
+  });
+
+  return Object.keys(count).map((version) => ({ version, nodes: count[version] })).sort((a, b) => {
+    const cmp = compareVersions(b.version.split('+')[0], a.version.split('+')[0]);
+
+    return Number.isNaN(cmp) || cmp === 0 ? b.version.localeCompare(a.version) : cmp;
+  });
+}
+
+export interface MachineVersion {
+  /** Pool the machine belongs to */
+  pool: string;
+  /** Name of the machine's node; '' while it has none */
+  node: string;
+  /** Kubernetes version Cluster API reports for the machine's node; '' when not reported */
+  kubelet: string;
+}
+
+/**
+ * Kubernetes versions that really run, per pool and for the whole cluster. An in-place upgrade by the
+ * Lifecycle Manager changes the nodes and not the Cluster API objects, so `spec.version` of the control
+ * plane and of the machine deployments keeps naming the version the cluster was created with.
+ * The node's own word (`nodeKubelet`, read from the workload cluster) wins over the copy Cluster API
+ * keeps in the Machine status, which is refreshed less often.
+ */
+export function runningByPool(machines: MachineVersion[], nodeKubelet: Record<string, string> | null): { all: RunningVersion[]; pools: Record<string, RunningVersion[]> } {
+  const byPool: Record<string, string[]> = {};
+  const all: string[] = [];
+
+  (machines || []).forEach((m) => {
+    const v = (m.node && nodeKubelet?.[m.node]) || m.kubelet || '';
+
+    if (v) {
+      (byPool[m.pool] = byPool[m.pool] || []).push(v);
+      all.push(v);
+    }
+  });
+  const pools: Record<string, RunningVersion[]> = {};
+
+  Object.keys(byPool).forEach((p) => {
+    pools[p] = runningKubernetes(byPool[p]);
+  });
+
+  // Without machines (not listable for the user) the nodes alone still say what the cluster runs
+  return { all: runningKubernetes(all.length ? all : Object.values(nodeKubelet || {})), pools };
+}
+
+// ---- Ready for an upgrade: Rancher's changes to a freshly imported cluster are finished ----
+
+/** Rancher setting that names the chart version of the system upgrade controller Rancher installs in every imported cluster. */
+export const SUC_CHART_SETTING = 'system-upgrade-controller-chart-version';
+/** Where Rancher and the Elemental release install the system upgrade controller, and where its Plans live. */
+export const SUC_NAMESPACE = 'cattle-system';
+export const SUC_NAME = 'system-upgrade-controller';
+
+export type ReadinessState = 'ready' | 'waiting' | 'unknown';
+
+/**
+ * What the page read. For each: `undefined` = could not be read (refused, or the request failed),
+ * `null` = read, and it does not exist.
+ */
+export interface ReadinessFacts {
+  /** Value of the Rancher setting SUC_CHART_SETTING on the management cluster */
+  wantedChart: string | null | undefined;
+  /** Helm release of the controller in the workload cluster, as Rancher's catalog shows it: apps.catalog.cattle.io cattle-system/system-upgrade-controller */
+  app: any | null | undefined;
+  /** Deployment cattle-system/system-upgrade-controller in the workload cluster */
+  deployment: any | null | undefined;
+  /** plans.upgrade.cattle.io in cattle-system of the workload cluster */
+  plans: any[] | undefined;
+}
+
+export interface ReadinessCheck {
+  key: 'chart' | 'controller' | 'plans';
+  /** null: could not be checked */
+  passed: boolean | null;
+  /** Variant of the text to show */
+  code: string;
+  params: Record<string, any>;
+}
+
+export interface Readiness {
+  state: ReadinessState;
+  checks: ReadinessCheck[];
+}
+
+/**
+ * Is the cluster ready for an upgrade by the Lifecycle Manager?
+ *
+ * Rancher changes a cluster for some minutes after it has imported it and already shows it as ready:
+ * it replaces the system upgrade controller the Elemental release installed with the chart version of its
+ * own setting, and it installs its node agent with a Plan of that controller. The Lifecycle Manager runs
+ * every step of an upgrade as Plans of the same controller and, on a cluster with Rancher's agent, leaves
+ * the controller to Rancher. An upgrade started before Rancher is done runs on the old controller (whose
+ * kubectl image may not fit the cluster's Kubernetes: cordon and drain fail) and has the controller
+ * replaced under it. Ready therefore means, all read from what the cluster's owner can read:
+ *
+ *  1. chart:      the Helm release of the controller has the chart version of Rancher's setting and is deployed;
+ *  2. controller: its Deployment is rolled out (the generation is observed, every replica updated and available);
+ *  3. plans:      no Plan in the controller's namespace is being applied to a node, and every Plan that
+ *                 has been evaluated is complete (Rancher's node agent Plan is the one that matters).
+ *
+ * One of them false: waiting. All true: ready. Otherwise (something could not be read): unknown, which
+ * warns and does not block.
+ */
+export function upgradeReadiness(f: ReadinessFacts): Readiness {
+  const checks: ReadinessCheck[] = [];
+  const have = f.app?.spec?.chart?.metadata?.version || '';
+  const state = f.app?.status?.summary?.state || f.app?.spec?.info?.status || '';
+  const want = f.wantedChart || '';
+
+  if (f.app === undefined || f.wantedChart === undefined || (f.app && !have)) {
+    checks.push({
+      key: 'chart', passed: null, code: f.wantedChart === undefined ? 'noSetting' : 'unread', params: { have, want }
+    });
+  } else if (!want) {
+    // Rancher installs no controller of its own (setting empty): nothing will be replaced
+    checks.push({
+      key: 'chart', passed: true, code: 'notManaged', params: { have, want }
+    });
+  } else if (f.app === null) {
+    checks.push({
+      key: 'chart', passed: false, code: 'missing', params: { have, want }
+    });
+  } else {
+    const ok = have === want && state === 'deployed';
+
+    checks.push({
+      key:    'chart',
+      passed: ok,
+      code:   ok ? 'ok' : (have === want ? 'notDeployed' : 'other'),
+      params: {
+        have, want, state
+      }
+    });
+  }
+
+  if (f.deployment === undefined) {
+    checks.push({
+      key: 'controller', passed: null, code: 'unread', params: {}
+    });
+  } else if (f.deployment === null) {
+    checks.push({
+      key: 'controller', passed: false, code: 'missing', params: {}
+    });
+  } else {
+    const d = f.deployment;
+    const replicas = d.spec?.replicas ?? 1;
+    const st = d.status || {};
+    const ok = replicas > 0 && (st.observedGeneration || 0) >= (d.metadata?.generation || 0) && (st.updatedReplicas || 0) === replicas && (st.availableReplicas || 0) === replicas && (st.replicas || 0) === replicas;
+
+    checks.push({
+      key:    'controller',
+      passed: ok,
+      code:   ok ? 'ok' : 'rollingOut',
+      params: {
+        image: d.spec?.template?.spec?.containers?.[0]?.image || '', ready: st.availableReplicas || 0, replicas
+      },
+    });
+  }
+
+  if (f.plans === undefined) {
+    checks.push({
+      key: 'plans', passed: null, code: 'unread', params: {}
+    });
+  } else {
+    const busy = f.plans.filter((p) => (p.status?.applying || []).length > 0 || (p.status?.conditions || []).some((c: any) => c.type === 'Complete' && c.status !== 'True'));
+    const names = busy.map((p) => {
+      const on = (p.status?.applying || []).join(', ');
+
+      return on ? `${ p.metadata?.name } (${ on })` : `${ p.metadata?.name }`;
+    }).join('; ');
+
+    checks.push({
+      key: 'plans', passed: busy.length === 0, code: busy.length === 0 ? 'ok' : 'applying', params: { plans: names, count: f.plans.length }
+    });
+  }
+
+  const all = checks.map((c) => c.passed);
+
+  return { state: all.includes(false) ? 'waiting' : (all.every((x) => x === true) ? 'ready' : 'unknown'), checks };
 }
