@@ -635,3 +635,14 @@ export function upgradeReadiness(f: ReadinessFacts): Readiness {
 
   return { state: all.includes(false) ? 'waiting' : (all.every((x) => x === true) ? 'ready' : 'unknown'), checks };
 }
+
+/**
+ * What the release picker holds, as text. A release chosen from the list arrives as its manifest reference;
+ * a typed one arrives as text when the list is empty, and as an object `{ label: <typed> }` when the list
+ * has entries (the select then builds an option out of what was typed).
+ */
+export function pickedText(value: any): string {
+  const v = value && typeof value === 'object' ? (value.value ?? value.label ?? '') : (value ?? '');
+
+  return `${ v }`.trim();
+}

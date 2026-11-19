@@ -1,5 +1,5 @@
 import {
-  appliedVersion, buildRelease, compareVersions, nodeFacts, offeredReleases, parseManifestRef, preflight, preflightPassed, planPendingNodes, runningByPool, runningKubernetes, selects,
+  appliedVersion, buildRelease, compareVersions, nodeFacts, offeredReleases, parseManifestRef, pickedText, preflight, preflightPassed, planPendingNodes, runningByPool, runningKubernetes, selects,
   upgradePhases, upgradeReadiness, upgradeState
 } from '../release';
 
@@ -457,5 +457,16 @@ describe('upgradeReadiness', () => {
     expect(checks('unknown')[0].passed).toBeNull();
     expect(preflightPassed(checks('unknown'))).toBe(true);
     expect(preflight(nodes, null, target, '', '1.37.1-17.1').map((c) => c.key)).not.toContain('settled');
+  });
+});
+
+describe('pickedText', () => {
+  it('reads a chosen reference, typed text, and the option object the select builds from typed text when the list has entries', () => {
+    expect(pickedText('192.0.2.5:5000/e3p/rke2-manifest:1.37.2-20.3-e3p.1')).toBe('192.0.2.5:5000/e3p/rke2-manifest:1.37.2-20.3-e3p.1');
+    expect(pickedText(' 1.37.2-20.3 ')).toBe('1.37.2-20.3');
+    expect(pickedText({ label: '192.0.2.5:5000/e3p/rke2-manifest:1.37.2-20.3-e3p.1' })).toBe('192.0.2.5:5000/e3p/rke2-manifest:1.37.2-20.3-e3p.1');
+    expect(pickedText({ value: 'r/m:1.0.0', label: '1.0.0 (node image)' })).toBe('r/m:1.0.0');
+    expect(pickedText(null)).toBe('');
+    expect(pickedText(undefined)).toBe('');
   });
 });

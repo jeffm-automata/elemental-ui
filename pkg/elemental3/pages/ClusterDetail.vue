@@ -14,7 +14,7 @@ import {
 } from '../lib/status';
 import {
   RELEASE_API, appliedVersion, buildRelease, manifestRef, nodeFacts, offeredReleases, parseManifestRef, preflight, preflightPassed,
-  runningByPool, upgradePhases, upgradeReadiness, upgradeState, SUC_CHART_SETTING, SUC_NAME, SUC_NAMESPACE
+  pickedText, runningByPool, upgradePhases, upgradeReadiness, upgradeState, SUC_CHART_SETTING, SUC_NAME, SUC_NAMESPACE
 } from '../lib/release';
 import { IMAGE_RELEASE_ANNOTATION, NODE_IMAGE_TYPE, errorText, harvesterBase } from '../lib/harvester';
 import { LIST_ROUTE, BLANK_CLUSTER } from '../product';
@@ -306,9 +306,14 @@ export default {
       return [...new Set(lines)];
     },
 
+    /** The picker's value as text: a reference chosen from the list, or what was typed */
+    targetText() {
+      return pickedText(this.targetKey);
+    },
+
     /** The selected or typed target. A bare version takes the registry the cluster's release comes from. */
     target() {
-      const key = `${ this.targetKey || '' }`.trim();
+      const key = this.targetText;
 
       if (!key) {
         return null;
@@ -324,7 +329,7 @@ export default {
     },
 
     targetInvalid() {
-      return !!`${ this.targetKey || '' }`.trim() && !this.target;
+      return !!this.targetText && !this.target;
     },
 
     /**
@@ -342,7 +347,7 @@ export default {
     },
 
     preflightChecks() {
-      return preflight(this.nodeList, this.release, this.target, this.dryRunFor === this.targetKey ? this.dryRunError : undefined, this.currentRelease?.version, this.readiness ? this.readiness.state : 'unknown');
+      return preflight(this.nodeList, this.release, this.target, this.dryRunFor === this.targetText ? this.dryRunError : undefined, this.currentRelease?.version, this.readiness ? this.readiness.state : 'unknown');
     },
 
     canUpgrade() {
@@ -360,7 +365,7 @@ export default {
   },
 
   watch: {
-    targetKey() {
+    targetText() {
       this.dryRunError = undefined;
       this.dryRunFor = '';
       if (this.target) {
@@ -742,7 +747,7 @@ export default {
 
     /** Pre-flight: the API server and the Lifecycle Manager's admission webhook judge the object without storing it. */
     async dryRunRelease() {
-      const key = this.targetKey;
+      const key = this.targetText;
 
       if (!this.rancherCluster || !this.target) {
         return;
@@ -757,7 +762,7 @@ export default {
           this.releaseDenied = rightText(RELEASE_API, this.release ? 'patch' : 'create');
         }
       }
-      if (key === this.targetKey) {
+      if (key === this.targetText) {
         this.dryRunError = result;
         this.dryRunFor = key;
       }
