@@ -199,6 +199,34 @@ export function rotatePatches(scope: RotateScope, controlPlaneName: string, pool
   return out;
 }
 
+/** RKE2 signs node certificates for this many days */
+export const CERTIFICATE_DAYS = 365;
+
+export interface CertificateAge {
+  /** Node that joined first, when it joined, and when certificates issued that day run out */
+  node: string;
+  issued: string;
+  expires: string;
+}
+
+/**
+ * The oldest certificates of the cluster, estimated from the nodes: a node's certificates are issued when
+ * it joins. RKE2 renews them by itself at a restart in the last months before they run out, so the real
+ * date can be later, never earlier. null when no node states when it was created.
+ */
+export function oldestCertificates(nodes: any[] | null | undefined): CertificateAge | null {
+  const joined = (nodes || []).map((n) => ({ node: `${ n?.metadata?.name || '' }`, at: Date.parse(n?.metadata?.creationTimestamp || '') })).filter((n) => !Number.isNaN(n.at)).sort((a, b) => a.at - b.at);
+
+  if (!joined.length) {
+    return null;
+  }
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+
+  return {
+    node: joined[0].node, issued: day(joined[0].at), expires: day(joined[0].at + CERTIFICATE_DAYS * 24 * 3600 * 1000)
+  };
+}
+
 export interface Rotation {
   /** When the last rotation was requested, '' when never */
   controlPlane: string;

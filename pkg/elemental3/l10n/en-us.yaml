@@ -199,6 +199,7 @@ elemental3:
       controlPlane: control plane nodes
       workers: worker nodes
     note: 'Every node gets its certificates when it joins the cluster. Rotation replaces the machines one at a time: a new machine first, then the old one is drained and deleted with its disk. The certificate authorities of the cluster stay. With one control plane machine the Kubernetes API is briefly unavailable while it is replaced.'
+    age: 'Oldest certificates: node {node} joined on {issued}, so its certificates run out about {expires} (estimated from the node: RKE2 signs for 365 days and renews by itself at a restart in the last months, so the real date can be later).'
     progress: 'Certificate rotation, {part}, requested {requested}: {replaced} of {wanted} machines replaced, {old} still to go.'
     done: 'Certificate rotation, {part}, requested {requested}: done, {replaced} of {wanted} machines replaced.'
     cannot: 'Your account may not change the control plane and the worker pool.'

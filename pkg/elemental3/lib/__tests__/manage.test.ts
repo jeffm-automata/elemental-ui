@@ -1,5 +1,5 @@
 import {
-  DEFAULT_SNAPSHOT_CRON, ROTATED_ANNOTATION, SNAPSHOT_IMAGE, invalidS3, s3Secret, sameS3, healthCheck, healthCheckFor, healthCheckName, healthCheckSummary, lastRotation, parseLabels,
+  DEFAULT_SNAPSHOT_CRON, ROTATED_ANNOTATION, oldestCertificates, SNAPSHOT_IMAGE, invalidS3, s3Secret, sameS3, healthCheck, healthCheckFor, healthCheckName, healthCheckSummary, lastRotation, parseLabels,
   poolBootstrapPatch, poolLabels, relabelledBootstrapTemplate, rotatePatches, rotationProgress, rotationStamp, sameLabels, schedulePatch,
   sizeText, snapshotJob, snapshotJobState, snapshotRows, snapshotSchedule, validCron, validMinutes, validRetention
 } from '../manage';
@@ -145,6 +145,17 @@ describe('certificate rotation', () => {
   it('keeps to the scope', () => {
     expect(rotatePatches('controlPlane', 'demo-cp', ['demo-md-0'], stamp).map((p) => p.name)).toStrictEqual(['demo-cp']);
     expect(rotatePatches('workers', 'demo-cp', ['demo-md-0'], stamp).map((p) => p.name)).toStrictEqual(['demo-md-0']);
+  });
+
+  it('estimates the oldest certificates from the node that joined first', () => {
+    expect(oldestCertificates(null)).toBeNull();
+    expect(oldestCertificates([{ metadata: { name: 'x' } }])).toBeNull();
+    expect(oldestCertificates([
+      { metadata: { name: 'b', creationTimestamp: '2026-11-26T06:00:00Z' } },
+      { metadata: { name: 'a', creationTimestamp: '2026-03-01T10:00:00Z' } },
+    ])).toStrictEqual({
+      node: 'a', issued: '2026-03-01', expires: '2027-03-01'
+    });
   });
 
   it('reads the last request back from the objects', () => {

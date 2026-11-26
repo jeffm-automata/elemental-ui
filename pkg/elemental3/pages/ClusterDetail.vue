@@ -22,7 +22,7 @@ import {
 } from '../lib/catalog';
 import {
   DEFAULT_UNHEALTHY_MINUTES, MHC_API, SNAPSHOT_FILES_PATH, SNAPSHOT_JOB_LABEL, SNAPSHOT_JOB_NAMESPACE,
-  healthCheck, healthCheckFor, healthCheckSummary, lastRotation, parseLabels, poolBootstrapPatch, poolLabels,
+  healthCheck, healthCheckFor, healthCheckSummary, lastRotation, oldestCertificates, parseLabels, poolBootstrapPatch, poolLabels,
   relabelledBootstrapTemplate, rotatePatches, rotationProgress, rotationStamp, sameLabels, schedulePatch, sizeText,
   invalidS3, s3Secret, sameS3, snapshotJob, snapshotJobState, snapshotRows, snapshotSchedule, validCron, validMinutes, validRetention
 } from '../lib/manage';
@@ -314,6 +314,10 @@ export default {
 
     canRotate() {
       return this.can.scaleControlPlane && this.can.scaleWorkers;
+    },
+
+    certificateAge() {
+      return oldestCertificates(this.nodes);
     },
 
     rotation() {
@@ -1460,6 +1464,12 @@ export default {
       >
         <h3>{{ t('elemental3.certificates.rotate') }}</h3>
         <p>{{ t('elemental3.certificates.note') }}</p>
+        <p
+          v-if="certificateAge"
+          data-testid="elemental3-rotate-age"
+        >
+          {{ t('elemental3.certificates.age', certificateAge) }}
+        </p>
         <label>{{ t('elemental3.certificates.scope') }}
           <select
             v-model="rotateScope"
