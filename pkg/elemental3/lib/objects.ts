@@ -95,6 +95,13 @@ export interface WizardValues {
   controlPlaneHost: string;
   controlPlane: PoolValues;
   workers: PoolValues;
+  /**
+   * Replace a worker machine whose node stays not ready (a MachineHealthCheck for the worker pool).
+   * On unless set to false.
+   */
+  autoReplace?: boolean;
+  /** Minutes a worker node may be not ready before its machine is replaced */
+  autoReplaceMinutes?: number;
 }
 
 export interface BuildOptions {
@@ -129,6 +136,7 @@ export function defaultValues(): WizardValues {
     controlPlaneHost:  '',
     controlPlane:      { ...DEFAULT_POOL },
     workers:           { ...DEFAULT_POOL, count: 0 },
+    autoReplace:       true,
   };
 }
 
@@ -337,6 +345,65 @@ function machineTemplate(name: string, v: WizardValues, pool: PoolValues, labels
   };
 }
 
+
+// ---- Automatic replacement of a failed worker (J-MANAGE-02, the automatic half) ----
+
+export const MHC_API: ApiRef = {
+  group: 'cluster.x-k8s.io', version: 'v1beta2', resource: 'machinehealthchecks', kind: 'MachineHealthCheck'
+};
+
+/** Minutes a node may be not ready or unreachable before its machine is replaced (the form's default) */
+export const DEFAULT_UNHEALTHY_MINUTES = 5;
+
+/**
+ * Time a new machine has to become a node before it counts as failed. Cluster API's default is ten
+ * minutes; an Elemental 3 machine on a busy host has been seen to need more than that from the VM to the
+ * node, and a machine replaced for being slow is slower still.
+ */
+export const NODE_STARTUP_SECONDS = 30 * 60;
+
+export function healthCheckName(poolName: string): string {
+  const suffix = '-auto-replace';
+
+  return `${ poolName.slice(0, 63 - suffix.length) }${ suffix }`;
+}
+
+/**
+ * The MachineHealthCheck of one worker pool: a machine whose node is not ready, or not heard of, for
+ * `minutes` is deleted by Cluster API and the pool creates another one. No limit on how many machines of
+ * the pool may be unhealthy at once, as with the "auto replace" setting of a provisioning v2 pool: with a
+ * limit a pool of one machine would never be remediated. Cluster API makes the Cluster the owner, so the
+ * object goes with the cluster. Control plane machines are not selected.
+ */
+export function healthCheck(clusterName: string, namespace: string, poolName: string, minutes: number = DEFAULT_UNHEALTHY_MINUTES): any {
+  const timeoutSeconds = minutes * 60;
+
+  return {
+    apiVersion: `${ MHC_API.group }/${ MHC_API.version }`,
+    kind:       MHC_API.kind,
+    metadata:   {
+      name:   healthCheckName(poolName),
+      namespace,
+      labels: { [CLUSTER_NAME_LABEL]: clusterName, [CREATED_BY_LABEL]: CREATED_BY_VALUE },
+    },
+    spec: {
+      clusterName,
+      selector: { matchLabels: { [DEPLOYMENT_NAME_LABEL]: poolName } },
+      checks:   {
+        nodeStartupTimeoutSeconds: NODE_STARTUP_SECONDS,
+        unhealthyNodeConditions:   [
+          {
+            type: 'Ready', status: 'False', timeoutSeconds
+          },
+          {
+            type: 'Ready', status: 'Unknown', timeoutSeconds
+          },
+        ],
+      },
+    },
+  };
+}
+
 /**
  * The objects in the order they are written. The Cluster comes first so that the identity Secret can
  * name it as owner; Cluster API tolerates references to objects that appear a moment later.
@@ -503,7 +570,7 @@ export function buildObjects(v: WizardValues, opts: BuildOptions): WizardObject[
     },
   };
 
-  return [
+  const out: WizardObject[] = [
     {
       key: 'cluster', api: API.cluster, object: cluster
     },
@@ -529,6 +596,15 @@ export function buildObjects(v: WizardValues, opts: BuildOptions): WizardObject[
       key: 'workers', api: API.md, object: workers
     },
   ];
+
+  // Last: everything it refers to exists, and a cluster without it is complete
+  if (v.autoReplace !== false) {
+    out.push({
+      key: 'workerHealthCheck', api: MHC_API, object: healthCheck(n.cluster, ns, n.workers, v.autoReplaceMinutes || DEFAULT_UNHEALTHY_MINUTES)
+    });
+  }
+
+  return out;
 }
 
 /** Kubernetes API collection path of an object, relative to the API root of the management cluster. */

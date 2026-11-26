@@ -14,6 +14,7 @@ The form only writes objects, with the rights of the logged-in user, that can eq
 | `HarvesterMachineTemplate` x 2 | `<name>-cp`, `<name>-worker` |
 | `RKE2ConfigTemplate` (bootstrap.cluster.x-k8s.io/v1beta2) | `<name>-worker` |
 | `MachineDeployment` | `<name>-md-0` |
+| `MachineHealthCheck` for the worker pool, unless switched off in the form | `<name>-md-0-auto-replace` |
 
 Everything after that is done by controllers on the management cluster: Cluster API and Rancher Turtles, the RKE2
 provider (CAPRKE2) and the Harvester provider (CAPHV). The extension contains no lifecycle logic.
@@ -86,6 +87,24 @@ fails in cordon and drain until Rancher is done. The release panel reads, with t
 One check failing: "not ready yet", and Upgrade stays disabled. Something unreadable, or the right chart version
 without Rancher's label: a warning, Upgrade stays possible. The rule is in `lib/release.ts` (`upgradeReadiness`).
 
+## Manage controls on the cluster page (since 0.6.0)
+
+All of them write objects a user could apply with `kubectl`, with the rights of the logged-in user; the rules are
+in `lib/manage.ts`. x86-64 only, tried on Harvester VMs only.
+
+| Control | Where | What is written |
+|---|---|---|
+| **Automatic replacement** of a failed worker machine | Create form: on by default (one box). Cluster page, under the pool table: on with a number of minutes, or off | One `MachineHealthCheck` `<pool>-auto-replace` for the worker pool: node `Ready` false or unknown for the minutes (default 5), 30 minutes for a new machine to become a node, no limit on unhealthy machines. Off deletes it. Control plane machines are not selected |
+| **Node labels** of a worker pool | Under the pool table: Edit labels | One new `RKE2ConfigTemplate` (the pool's with `agentConfig.nodeLabels` replaced) and the pool's `bootstrap.configRef.name`. Cluster API replaces the pool's machines one by one. Keys under `kubernetes.io` and `k8s.io` are refused in the form |
+| **Rotate certificates** | Header | Workers: `spec.rollout.after` on the MachineDeployment. Control plane: the node annotation `elemental.suse.com/certificates-rotated` in `agentConfig.nodeAnnotations` of the RKE2ControlPlane (it has no `rolloutAfter`; a changed bootstrap configuration is what makes the RKE2 provider replace its machines). Every replaced node gets new certificates from the cluster's authorities when it joins; the authorities stay. The page counts replaced machines. Not offered while an upgrade runs, and not on a cluster that was upgraded in place (the machine templates still name the image it was created from) |
+| **Download kubeconfig**, **Members**, **Projects** | Header, once Rancher has imported the cluster | Nothing by this extension: Rancher's own kubeconfig for the imported cluster and Rancher's own pages for cluster members and for projects and namespaces |
+| **Snapshots** tab: list | Tab | Reads `etcdsnapshotfiles.k3s.cattle.io` in the workload cluster through Rancher's proxy |
+| **Snapshots** tab: schedule, retention, S3 target | Change schedule | `serverConfig.etcd.backupConfig` of the RKE2ControlPlane (`scheduleCron`, `retention`, `s3`), and for S3 one Secret with the two keys, owned by the Cluster. The RKE2 provider replaces the control plane machines to apply it |
+| **Snapshots** tab: Snapshot now | Button | One `Job` in `kube-system` of the workload cluster: a privileged pod on a control plane node that enters the host's namespaces and runs the node's own `rke2 etcd-snapshot save --name on-demand`. This is the one place where the page starts work on a node itself: Cluster API and the RKE2 provider have no object for a snapshot on request. The Job removes itself an hour after it finished |
+
+Not built: restoring a snapshot, certificate expiry dates, rotation in place, labels and size of the control plane
+pool, chart values.
+
 ## Layout
 
 - `provisioner.ts`: the card (`IClusterProvisioner` with its own `component`)
@@ -96,6 +115,7 @@ without Rancher's label: a warning, Upgrade stays possible. The rule is in `lib/
 - `lib/status.ts`: object status to progress phases, problems, pool and machine rows (no dependencies)
 - `lib/release.ts`: the release, upgrade phases, pre-flight, readiness, running versions (no dependencies)
 - `lib/catalog.ts`: the release catalog and the fallback when there is none (no dependencies)
+- `lib/manage.ts`: automatic replacement, node labels, certificate rotation, snapshots (no dependencies)
 
 ## Build, lint, test
 

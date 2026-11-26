@@ -20,6 +20,12 @@ import { IMAGE_RELEASE_ANNOTATION, NODE_IMAGE_TYPE, errorText, harvesterBase } f
 import {
   CATALOG_PATH, catalogLabel, componentText, currentLineage, knownReleases, notOfferedGroups, pickedRelease
 } from '../lib/catalog';
+import {
+  DEFAULT_UNHEALTHY_MINUTES, MHC_API, SNAPSHOT_FILES_PATH, SNAPSHOT_JOB_LABEL, SNAPSHOT_JOB_NAMESPACE,
+  healthCheck, healthCheckFor, healthCheckSummary, lastRotation, parseLabels, poolBootstrapPatch, poolLabels,
+  relabelledBootstrapTemplate, rotatePatches, rotationProgress, rotationStamp, sameLabels, schedulePatch, sizeText,
+  invalidS3, s3Secret, sameS3, snapshotJob, snapshotJobState, snapshotRows, snapshotSchedule, validCron, validMinutes, validRetention
+} from '../lib/manage';
 import { LIST_ROUTE, BLANK_CLUSTER } from '../product';
 
 const MGMT_API = '/k8s/clusters/local';
@@ -36,8 +42,11 @@ function httpStatus(e) {
  * conditions, events, and its Elemental release with the upgrade.
  *
  * The page reads object status with the rights of the logged-in user and refreshes every ten seconds.
- * It writes exactly three things, each on a click: the replica count of a pool, the cluster's one
- * Release object, and the deletion of the Cluster. Everything else is done by the controllers.
+ * It writes only on a click, and only objects a user could apply with kubectl: the replica count of a
+ * pool, the deletion of a worker Machine, new machine and bootstrap templates with the pool's reference
+ * to them, the pool's MachineHealthCheck, the rotation request and the snapshot schedule on the pool
+ * objects, the cluster's one Release, a snapshot Job, and the deletion of the Cluster. Everything else
+ * is done by the controllers. Kubeconfig, members and projects are Rancher's own functions.
  */
 export default {
   name: 'Elemental3ClusterDetail',
@@ -67,12 +76,31 @@ export default {
       controlPlane:       null,
       machineDeployments: [],
       templates:          {},
+      // RKE2ConfigTemplates of the namespace by name, and the MachineHealthChecks; null: not readable
+      bootstrapTemplates: {},
+      healthChecks:       null,
       machines:           null,
       events:             null,
       // Rights the user lacks, as { key: text } where text is the right as it has to be granted
       denied:             {},
       can:                {
-        scaleWorkers: false, scaleControlPlane: false, deleteCluster: false, replaceMachine: false, resizeWorkers: false
+        scaleWorkers: false, scaleControlPlane: false, deleteCluster: false, replaceMachine: false, resizeWorkers: false, healthCheck: false, relabelWorkers: false
+      },
+      // Minutes typed for the automatic replacement, per pool key
+      replaceMinutes:  {},
+      // Pool key whose node labels are being edited, and the text in the form
+      relabeling:      '',
+      labelsText:      '',
+      // Certificate rotation waiting for confirmation, and its scope
+      confirmRotate:   false,
+      rotateScope:     'all',
+      // etcd snapshots of the workload cluster; null: not read yet or not readable
+      snapshots:       null,
+      snapshotsError:  '',
+      snapshotJobs:    [],
+      editingSchedule: false,
+      scheduleTo:      {
+        cron: '', retention: 0, s3: false, endpoint: '', bucket: '', folder: '', region: '', skipTlsVerify: false, accessKey: '', secretKey: ''
       },
       // Pool key whose machine size is being edited, and the values in the form
       resizing:       '',
@@ -226,16 +254,23 @@ export default {
         const t = this.templates[p.templateName]?.spec?.template?.spec || {};
         const running = this.running.pools[p.name] || [];
 
+        const md = p.role === 'worker' ? this.machineDeployments.find((m) => m.metadata?.name === p.name) : null;
+        const bootstrapName = md?.spec?.template?.spec?.bootstrap?.configRef?.name || '';
+
         return {
           ...p,
-          running:  this.versionsText(running),
+          bootstrapName,
+          // undefined: the pool's bootstrap template could not be read, so its labels are not known
+          labels:      this.bootstrapTemplates[bootstrapName] ? poolLabels(this.bootstrapTemplates[bootstrapName]) : undefined,
+          healthCheck: p.role === 'worker' ? healthCheckSummary(healthCheckFor(this.healthChecks, this.name, p.name)) : null,
+          running:     this.versionsText(running),
           // The declared version is worth a line of its own only when it is not what runs
-          drift:    running.length > 0 && running.some((r) => r.version !== p.version),
-          cpu:      t.cpu || '',
-          memory:   t.memory || '',
-          disk:     t.volumes?.[0]?.volumeSize || '',
-          size:     templateSize(this.templates[p.templateName]),
-          canScale: p.role === 'worker' ? this.can.scaleWorkers : this.can.scaleControlPlane,
+          drift:       running.length > 0 && running.some((r) => r.version !== p.version),
+          cpu:         t.cpu || '',
+          memory:      t.memory || '',
+          disk:        t.volumes?.[0]?.volumeSize || '',
+          size:        templateSize(this.templates[p.templateName]),
+          canScale:    p.role === 'worker' ? this.can.scaleWorkers : this.can.scaleControlPlane,
         };
       });
     },
@@ -254,6 +289,113 @@ export default {
 
     deniedList() {
       return Object.values(this.denied);
+    },
+
+    defaultMinutes() {
+      return DEFAULT_UNHEALTHY_MINUTES;
+    },
+
+    workerPools() {
+      return this.pools.filter((p) => p.role === 'worker');
+    },
+
+    // ---- Certificates ----
+
+    /**
+     * The nodes run another release than the machine templates name (an upgrade in place does not change
+     * the templates): a replaced machine would start from the older image. Replacing every control plane
+     * machine in that state would take the control plane back to the older release, so rotation is not offered.
+     */
+    templatesBehind() {
+      const applied = appliedVersion(this.release);
+
+      return this.pools.some((p) => p.drift) || (!!applied && !!this.createdFrom && applied !== this.createdFrom.version);
+    },
+
+    canRotate() {
+      return this.can.scaleControlPlane && this.can.scaleWorkers;
+    },
+
+    rotation() {
+      return lastRotation(this.controlPlane, this.machineDeployments);
+    },
+
+    /** One row per part of the cluster a rotation was requested for */
+    rotationRows() {
+      const rows = [];
+      const add = (role, requested, wanted) => {
+        const p = rotationProgress(requested, this.machineList, role, wanted);
+
+        if (p) {
+          rows.push({
+            role, requested, ...p
+          });
+        }
+      };
+
+      add('controlPlane', this.rotation.controlPlane, this.pools.filter((p) => p.role === 'controlPlane').reduce((n, p) => n + p.desired, 0));
+      add('worker', this.rotation.workers, this.workerPools.filter((p) => this.machineDeployments.find((m) => m.metadata?.name === p.name)?.spec?.rollout?.after).reduce((n, p) => n + p.desired, 0));
+
+      return rows;
+    },
+
+    // ---- Rancher's own pages for the imported cluster ----
+
+    membersRoute() {
+      return this.rancherCluster ? { name: 'c-cluster-product-members', params: { cluster: this.rancherCluster.id, product: 'explorer' } } : null;
+    },
+
+    projectsRoute() {
+      return this.rancherCluster ? { name: 'c-cluster-product-projectsnamespaces', params: { cluster: this.rancherCluster.id, product: 'explorer' } } : null;
+    },
+
+    // ---- etcd snapshots ----
+
+    snapshotList() {
+      return snapshotRows(this.snapshots).map((s) => ({ ...s, sizeText: sizeText(s.size) }));
+    },
+
+    schedule() {
+      return snapshotSchedule(this.controlPlane);
+    },
+
+    /** The S3 target as typed; null when the box is not ticked */
+    typedS3() {
+      const f = this.scheduleTo;
+
+      return f.s3 ? {
+        endpoint: f.endpoint, bucket: f.bucket, folder: f.folder, region: f.region, skipTlsVerify: !!f.skipTlsVerify
+      } : null;
+    },
+
+    /** True when the S3 target or its keys change: then both keys are needed, and a new Secret is written */
+    s3Changes() {
+      return !sameS3(this.typedS3, this.schedule.s3Config) || (!!this.typedS3 && (!!this.scheduleTo.accessKey || !!this.scheduleTo.secretKey));
+    },
+
+    s3Invalid() {
+      if (!this.typedS3 || !this.s3Changes) {
+        return [];
+      }
+
+      return [...invalidS3(this.typedS3), ...(this.scheduleTo.accessKey ? [] : ['accessKey']), ...(this.scheduleTo.secretKey ? [] : ['secretKey'])];
+    },
+
+    scheduleChanged() {
+      const retention = Number(this.scheduleTo.retention);
+
+      if (!validCron(this.scheduleTo.cron) || !validRetention(retention) || this.s3Invalid.length) {
+        return false;
+      }
+
+      return this.scheduleTo.cron.trim() !== this.schedule.cron || retention !== this.schedule.retention || !this.schedule.stated || this.s3Changes;
+    },
+
+    /** The newest snapshot Job of this page, with its state */
+    snapshotJob() {
+      const jobs = [...this.snapshotJobs].sort((a, b) => `${ b.metadata?.creationTimestamp }`.localeCompare(`${ a.metadata?.creationTimestamp }`));
+
+      return jobs.length ? { name: jobs[0].metadata.name, state: snapshotJobState(jobs[0]) } : null;
     },
 
     endpoint() {
@@ -499,11 +641,13 @@ export default {
         }
       };
 
-      const [infra, cp, mds, templates, machines, events] = await Promise.all([
+      const [infra, cp, mds, templates, bootstraps, checks, machines, events] = await Promise.all([
         optional(() => (infraName ? this.mgmt('get', objectPath(API.infraCluster, ns, infraName)) : null), null),
         optional(() => (cpName ? this.mgmt('get', objectPath(API.controlPlane, ns, cpName)) : null), null),
         optional(() => this.mgmt('get', collectionPath(API.md, ns) + selector), { items: [] }),
         optional(() => this.mgmt('get', collectionPath(API.infraMachine, ns)), { items: [] }),
+        optional(() => this.mgmt('get', collectionPath(API.bootstrap, ns)), { items: [] }),
+        optional(() => this.mgmt('get', collectionPath(MHC_API, ns)), null),
         guarded('machines', READ_API.machine, () => this.listMachines(ns, selector)),
         guarded('events', READ_API.event, () => this.mgmt('get', collectionPath(READ_API.event, ns))),
       ]);
@@ -512,6 +656,8 @@ export default {
       this.controlPlane = cp;
       this.machineDeployments = mds?.items || [];
       this.templates = (templates?.items || []).reduce((acc, t) => ({ ...acc, [t.metadata.name]: t }), {});
+      this.bootstrapTemplates = (bootstraps?.items || []).reduce((acc, t) => ({ ...acc, [t.metadata.name]: t }), {});
+      this.healthChecks = checks ? (checks.items || []) : null;
       this.machines = machines;
       this.events = events;
       this.lastRefresh = new Date().toISOString();
@@ -573,6 +719,7 @@ export default {
           this.releaseError = errorText(e);
         }
       }
+      await this.loadSnapshots();
       // While not ready this is read with every refresh; once ready, once a minute
       if (!this.upgradeRunning && (!this.readiness || this.readiness.state !== 'ready' || Date.now() - this.readinessRead > 60000)) {
         await this.loadReadiness();
@@ -607,6 +754,24 @@ export default {
       this.readinessRead = Date.now();
     },
 
+    /** Snapshots RKE2 knows, and the snapshot Jobs this page started, both in the workload cluster. */
+    async loadSnapshots() {
+      try {
+        this.snapshots = (await this.workload('get', SNAPSHOT_FILES_PATH))?.items || [];
+        this.snapshotsError = '';
+      } catch (e) {
+        this.snapshots = null;
+        this.snapshotsError = httpStatus(e) === 403 ? this.t('elemental3.rights.missing', { right: 'list etcdsnapshotfiles.k3s.cattle.io' }) : errorText(e);
+      }
+      try {
+        const jobs = await this.workload('get', `/apis/batch/v1/namespaces/${ SNAPSHOT_JOB_NAMESPACE }/jobs?labelSelector=${ encodeURIComponent(`${ SNAPSHOT_JOB_LABEL }=true`) }`);
+
+        this.snapshotJobs = jobs?.items || [];
+      } catch (e) {
+        this.snapshotJobs = [];
+      }
+    },
+
     async review(base, api, verb, name) {
       try {
         const r = await this.request('post', `${ base }${ ACCESS_REVIEW_PATH }`, accessReview(api, verb, this.namespace, name));
@@ -626,16 +791,24 @@ export default {
       const mdName = this.machineDeployments[0]?.metadata?.name;
       const cpName = this.cluster.spec?.controlPlaneRef?.name;
       const workerMachine = (this.machines || []).find((m) => !('cluster.x-k8s.io/control-plane' in (m.metadata?.labels || {})))?.metadata?.name;
-      const [md, cp, del, rm, tpl] = await Promise.all([
+      const [md, cp, del, rm, tpl, mhc, boot] = await Promise.all([
         mdName ? this.review(MGMT_API, API.md, 'patch', mdName) : Promise.resolve(null),
         this.review(MGMT_API, API.controlPlane, 'patch', cpName),
         this.review(MGMT_API, API.cluster, 'delete', this.name),
         this.review(MGMT_API, READ_API.machine, 'delete', workerMachine),
         this.review(MGMT_API, API.infraMachine, 'create'),
+        this.review(MGMT_API, MHC_API, 'create'),
+        this.review(MGMT_API, API.bootstrap, 'create'),
       ]);
 
       this.can = {
-        scaleWorkers: md === true, scaleControlPlane: cp === true, deleteCluster: del === true, replaceMachine: rm !== false, resizeWorkers: md === true && tpl === true
+        scaleWorkers:      md === true,
+        scaleControlPlane: cp === true,
+        deleteCluster:     del === true,
+        replaceMachine:    rm !== false,
+        resizeWorkers:     md === true && tpl === true,
+        healthCheck:       mhc === true,
+        relabelWorkers:    md === true && boot === true,
       };
       const mark = (key, allowed, api, verb) => (allowed === false ? this.deny(key, api, verb) : this.allow(key));
 
@@ -779,6 +952,225 @@ export default {
         await this.load();
       } catch (e) {
         this.actionError = this.t('elemental3.pools.resizeFailed', { name: pool.name, error: errorText(e) }, true);
+      }
+      this.busy = '';
+    },
+
+    // ---- automatic replacement ----
+
+    minutesFor(pool) {
+      const typed = this.replaceMinutes[pool.key];
+
+      return typed === undefined || typed === '' ? DEFAULT_UNHEALTHY_MINUTES : Number(typed);
+    },
+
+    minutesValid(pool) {
+      return validMinutes(this.minutesFor(pool));
+    },
+
+    /** Automatic replacement on: one MachineHealthCheck for the pool. */
+    async enableAutoReplace(pool) {
+      if (this.busy || !this.minutesValid(pool)) {
+        return;
+      }
+      this.busy = `autoReplace:${ pool.key }`;
+      this.actionError = '';
+      try {
+        await this.mgmt('post', collectionPath(MHC_API, this.namespace), healthCheck(this.name, this.namespace, pool.name, this.minutesFor(pool)));
+        await this.load();
+      } catch (e) {
+        this.actionError = this.t('elemental3.autoReplace.failed', { name: pool.name, error: errorText(e) }, true);
+      }
+      this.busy = '';
+    },
+
+    /** Automatic replacement off: the pool's MachineHealthCheck is deleted. Nothing happens to the machines. */
+    async disableAutoReplace(pool) {
+      if (this.busy || !pool.healthCheck) {
+        return;
+      }
+      this.busy = `autoReplace:${ pool.key }`;
+      this.actionError = '';
+      try {
+        await this.mgmt('delete', objectPath(MHC_API, this.namespace, pool.healthCheck.name));
+        await this.load();
+      } catch (e) {
+        this.actionError = this.t('elemental3.autoReplace.failed', { name: pool.name, error: errorText(e) }, true);
+      }
+      this.busy = '';
+    },
+
+    // ---- node labels ----
+
+    openRelabel(pool) {
+      this.relabeling = pool.key;
+      this.labelsText = (pool.labels || []).join(', ');
+    },
+
+    typedLabels() {
+      return parseLabels(this.labelsText);
+    },
+
+    labelErrors() {
+      return this.typedLabels().errors.map((e) => this.t(`elemental3.labels.invalid.${ e.code }`, { entry: e.entry }, true));
+    },
+
+    labelsChanged(pool) {
+      const typed = this.typedLabels();
+
+      return !typed.errors.length && !sameLabels(typed.labels, pool.labels || []);
+    },
+
+    /**
+     * Other node labels for a worker pool: one new bootstrap template (the current one with the labels
+     * replaced) and one patch that points the pool at it. Cluster API then replaces the pool's machines
+     * one by one; the new nodes register with the labels.
+     */
+    async relabelPool(pool) {
+      if (this.busy || !this.labelsChanged(pool)) {
+        return;
+      }
+      const template = relabelledBootstrapTemplate(this.bootstrapTemplates[pool.bootstrapName], pool.name, this.typedLabels().labels, Date.now().toString(36));
+
+      this.busy = `relabel:${ pool.key }`;
+      this.actionError = '';
+      try {
+        await this.mgmt('post', collectionPath(API.bootstrap, this.namespace), template);
+        await this.mgmt('patch', objectPath(API.md, this.namespace, pool.name), poolBootstrapPatch(template.metadata.name), 'application/merge-patch+json');
+        this.relabeling = '';
+        await this.load();
+      } catch (e) {
+        this.actionError = this.t('elemental3.labels.failed', { name: pool.name, error: errorText(e) }, true);
+      }
+      this.busy = '';
+    },
+
+    // ---- certificates ----
+
+    /** Why certificates cannot be rotated now, '' when they can. */
+    rotateBlock() {
+      if (!this.canRotate) {
+        return this.t('elemental3.certificates.cannot');
+      }
+      if (this.upgradeRunning) {
+        return this.t('elemental3.pools.notDuringUpgrade');
+      }
+      if (this.templatesBehind) {
+        return this.t('elemental3.certificates.templatesBehind');
+      }
+
+      // Not `this.state`: in the script that name is the state of the page's fetch (Rancher's fetch mixin), not the computed value
+      return clusterState(this.objects) === 'ready' ? '' : this.t('elemental3.certificates.notReady');
+    },
+
+    /**
+     * Rotate certificates: one patch per pool object. Cluster API and the RKE2 provider replace the
+     * machines one at a time; every new node gets new certificates when it joins.
+     */
+    async rotateCertificates() {
+      if (this.busy || this.rotateBlock()) {
+        return;
+      }
+      const patches = rotatePatches(this.rotateScope, this.controlPlane?.metadata?.name || '', this.workerPools.map((p) => p.name), rotationStamp());
+
+      this.busy = 'rotate';
+      this.actionError = '';
+      try {
+        for (const p of patches) {
+          await this.mgmt('patch', objectPath(p.api, this.namespace, p.name), p.patch, 'application/merge-patch+json');
+        }
+        this.confirmRotate = false;
+        await this.load();
+      } catch (e) {
+        this.actionError = this.t('elemental3.certificates.failed', { error: errorText(e) }, true);
+      }
+      this.busy = '';
+    },
+
+    // ---- kubeconfig ----
+
+    /** Rancher's own kubeconfig for the imported cluster, as the cluster menu of Rancher's list gives it. */
+    async downloadKubeconfig() {
+      if (this.busy || !this.rancherCluster) {
+        return;
+      }
+      this.busy = 'kubeconfig';
+      this.actionError = '';
+      try {
+        await this.rancherCluster.downloadKubeConfig();
+      } catch (e) {
+        this.actionError = this.t('elemental3.access.kubeconfigFailed', { error: errorText(e) }, true);
+      }
+      this.busy = '';
+    },
+
+    // ---- etcd snapshots ----
+
+    openSchedule() {
+      const s3 = this.schedule.s3Config;
+
+      this.editingSchedule = true;
+      this.scheduleTo = {
+        cron:          this.schedule.cron,
+        retention:     this.schedule.retention,
+        s3:            !!s3,
+        endpoint:      s3?.endpoint || '',
+        bucket:        s3?.bucket || '',
+        folder:        s3?.folder || '',
+        region:        s3?.region || '',
+        skipTlsVerify: s3 ? s3.skipTlsVerify : false,
+        accessKey:     '',
+        secretKey:     '',
+      };
+    },
+
+    /**
+     * Schedule, retention and the S3 target: one patch of the control plane object (and before it one Secret
+     * with the S3 keys, when they are given); the control plane machines are replaced one by one.
+     */
+    async saveSchedule() {
+      if (this.busy || !this.scheduleChanged) {
+        return;
+      }
+      this.busy = 'schedule';
+      this.actionError = '';
+      try {
+        let s3;
+
+        if (this.s3Changes) {
+          s3 = null;
+          if (this.typedS3) {
+            const secret = s3Secret(this.name, this.namespace, this.cluster.metadata?.uid || '', this.scheduleTo.accessKey, this.scheduleTo.secretKey, Date.now().toString(36));
+
+            await this.mgmt('post', collectionPath(API.secret, this.namespace), secret);
+            s3 = {
+              ...this.typedS3, secretName: secret.metadata.name, secretNamespace: this.namespace
+            };
+          }
+        }
+        await this.mgmt('patch', objectPath(API.controlPlane, this.namespace, this.controlPlane.metadata.name), schedulePatch(this.scheduleTo.cron, Number(this.scheduleTo.retention), s3), 'application/merge-patch+json');
+        this.editingSchedule = false;
+        this.scheduleTo.accessKey = '';
+        this.scheduleTo.secretKey = '';
+        await this.load();
+      } catch (e) {
+        this.actionError = this.t('elemental3.snapshots.scheduleFailed', { error: errorText(e) }, true);
+      }
+      this.busy = '';
+    },
+
+    /** Snapshot now: one Job in the workload cluster that calls the node's own rke2. */
+    async snapshotNow() {
+      if (this.busy || !this.rancherCluster) {
+        return;
+      }
+      this.busy = 'snapshot';
+      this.actionError = '';
+      try {
+        await this.workload('post', `/apis/batch/v1/namespaces/${ SNAPSHOT_JOB_NAMESPACE }/jobs`, snapshotJob(Date.now().toString(36)));
+        await this.loadSnapshots();
+      } catch (e) {
+        this.actionError = this.t('elemental3.snapshots.nowFailed', { error: errorText(e) }, true);
       }
       this.busy = '';
     },
@@ -940,6 +1332,41 @@ export default {
         >
           {{ t('elemental3.detail.explore') }}
         </router-link>
+        <template v-if="rancherCluster && rancherReady">
+          <button
+            type="button"
+            class="btn role-secondary"
+            :disabled="!!busy"
+            data-testid="elemental3-detail-kubeconfig"
+            @click="downloadKubeconfig"
+          >
+            {{ t('elemental3.access.kubeconfig') }}
+          </button>
+          <router-link
+            :to="membersRoute"
+            class="btn role-secondary"
+            data-testid="elemental3-detail-members"
+          >
+            {{ t('elemental3.access.members') }}
+          </router-link>
+          <router-link
+            :to="projectsRoute"
+            class="btn role-secondary"
+            data-testid="elemental3-detail-projects"
+          >
+            {{ t('elemental3.access.projects') }}
+          </router-link>
+        </template>
+        <button
+          type="button"
+          class="btn role-secondary"
+          :disabled="!!rotateBlock() || !!busy || confirmRotate"
+          :title="rotateBlock()"
+          data-testid="elemental3-detail-rotate"
+          @click="confirmRotate = true"
+        >
+          {{ t('elemental3.certificates.rotate') }}
+        </button>
         <button
           v-if="!confirmDelete"
           type="button"
@@ -1024,6 +1451,50 @@ export default {
           </ul>
         </div>
       </Banner>
+
+      <!-- Certificates: the request, and how far the replacement of the machines is -->
+      <section
+        v-if="confirmRotate"
+        class="e3-panel"
+        data-testid="elemental3-rotate-form"
+      >
+        <h3>{{ t('elemental3.certificates.rotate') }}</h3>
+        <p>{{ t('elemental3.certificates.note') }}</p>
+        <label>{{ t('elemental3.certificates.scope') }}
+          <select
+            v-model="rotateScope"
+            data-testid="elemental3-rotate-scope"
+          >
+            <option value="all">{{ t('elemental3.certificates.scopes.all') }}</option>
+            <option value="controlPlane">{{ t('elemental3.certificates.scopes.controlPlane') }}</option>
+            <option value="workers">{{ t('elemental3.certificates.scopes.workers') }}</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          class="btn bg-error ml-10"
+          :disabled="!!busy || !!rotateBlock()"
+          data-testid="elemental3-rotate-apply"
+          @click="rotateCertificates"
+        >
+          {{ t('elemental3.certificates.apply') }}
+        </button>
+        <button
+          type="button"
+          class="btn role-secondary"
+          @click="confirmRotate = false"
+        >
+          {{ t('generic.cancel') }}
+        </button>
+      </section>
+      <Banner
+        v-for="r in rotationRows"
+        :key="`rotation-${ r.role }`"
+        :color="r.done ? 'success' : 'info'"
+        :data-testid="`elemental3-rotation-${ r.role }`"
+        :data-done="`${ r.done }`"
+        :label="t(r.done ? 'elemental3.certificates.done' : 'elemental3.certificates.progress', { part: t(`elemental3.pools.roles.${ r.role }`), requested: short(r.requested), replaced: r.replaced, wanted: r.wanted, old: r.old })"
+      />
 
       <!-- Progress: what is happening, from object status only -->
       <section
@@ -1518,6 +1989,113 @@ export default {
           >
             {{ t('elemental3.versions.declaredDiffers') }}
           </p>
+          <div
+            v-for="p in workerPools"
+            :key="`settings-${ p.key }`"
+            class="e3-pool-settings"
+            :data-testid="`elemental3-pool-settings-${ p.name }`"
+          >
+            <div
+              class="e3-setting"
+              data-testid="elemental3-auto-replace"
+              :data-state="p.healthCheck ? 'on' : 'off'"
+            >
+              <b class="mr-5">{{ t('elemental3.autoReplace.title') }}</b>
+              <template v-if="healthChecks === null">
+                {{ t('elemental3.autoReplace.unreadable') }}
+              </template>
+              <template v-else-if="p.healthCheck">
+                <span data-testid="elemental3-auto-replace-state">{{ [t('elemental3.autoReplace.on', { minutes: p.healthCheck.minutes }), p.healthCheck.expected !== undefined ? t('elemental3.autoReplace.status', { healthy: p.healthCheck.healthy || 0, expected: p.healthCheck.expected }) : '', p.healthCheck.remediating ? '' : t('elemental3.autoReplace.paused')].filter((x) => !!x).join(' ') }}</span>
+                <button
+                  type="button"
+                  class="btn btn-sm role-secondary ml-10"
+                  :disabled="!can.healthCheck || !!busy"
+                  :title="can.healthCheck ? '' : t('elemental3.autoReplace.cannot')"
+                  data-testid="elemental3-auto-replace-off"
+                  @click="disableAutoReplace(p)"
+                >
+                  {{ t('elemental3.autoReplace.turnOff') }}
+                </button>
+              </template>
+              <template v-else>
+                <span data-testid="elemental3-auto-replace-state">{{ t('elemental3.autoReplace.off') }}</span>
+                <label class="ml-10">{{ t('elemental3.autoReplace.minutes') }}
+                  <input
+                    v-model="replaceMinutes[p.key]"
+                    type="number"
+                    min="1"
+                    :placeholder="`${ defaultMinutes }`"
+                    data-testid="elemental3-auto-replace-minutes"
+                  >
+                </label>
+                <button
+                  type="button"
+                  class="btn btn-sm role-secondary"
+                  :disabled="!can.healthCheck || !!busy || !minutesValid(p)"
+                  :title="can.healthCheck ? '' : t('elemental3.autoReplace.cannot')"
+                  data-testid="elemental3-auto-replace-on"
+                  @click="enableAutoReplace(p)"
+                >
+                  {{ t('elemental3.autoReplace.turnOn') }}
+                </button>
+              </template>
+            </div>
+            <div
+              class="e3-setting"
+              data-testid="elemental3-labels"
+            >
+              <b class="mr-5">{{ t('elemental3.labels.title') }}</b>
+              <template v-if="relabeling !== p.key">
+                <span data-testid="elemental3-labels-current">{{ p.labels === undefined ? t('elemental3.labels.unreadable') : (p.labels.length ? p.labels.join(', ') : t('elemental3.labels.none')) }}</span>
+                <button
+                  type="button"
+                  class="btn btn-sm role-secondary ml-10"
+                  :disabled="!can.relabelWorkers || p.labels === undefined || !!busy || upgradeRunning"
+                  :title="can.relabelWorkers ? (upgradeRunning ? t('elemental3.pools.notDuringUpgrade') : '') : t('elemental3.labels.cannot')"
+                  data-testid="elemental3-labels-edit"
+                  @click="openRelabel(p)"
+                >
+                  {{ t('elemental3.labels.edit') }}
+                </button>
+              </template>
+              <template v-else>
+                <input
+                  v-model="labelsText"
+                  type="text"
+                  class="e3-labels-input"
+                  :placeholder="t('elemental3.labels.placeholder')"
+                  data-testid="elemental3-labels-input"
+                >
+                <button
+                  type="button"
+                  class="btn btn-sm bg-error"
+                  :disabled="!labelsChanged(p) || !!busy"
+                  data-testid="elemental3-labels-apply"
+                  @click="relabelPool(p)"
+                >
+                  {{ t('elemental3.labels.apply') }}
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-sm role-secondary"
+                  @click="relabeling = ''"
+                >
+                  {{ t('generic.cancel') }}
+                </button>
+                <div
+                  v-for="(e, i) in labelErrors()"
+                  :key="i"
+                  class="text-error e3-small"
+                  data-testid="elemental3-labels-error"
+                >
+                  {{ e }}
+                </div>
+                <div class="text-muted e3-small">
+                  {{ t('elemental3.labels.note') }}
+                </div>
+              </template>
+            </div>
+          </div>
           <Banner
             v-if="denied.scaleWorkers || denied.scaleControlPlane"
             color="warning"
@@ -1604,6 +2182,173 @@ export default {
               </tr>
             </tbody>
           </table>
+        </Tab>
+
+        <Tab
+          name="snapshots"
+          :label="t('elemental3.snapshots.title')"
+          :weight="3.5"
+        >
+          <div
+            class="e3-setting"
+            data-testid="elemental3-snapshot-schedule"
+          >
+            <b class="mr-5">{{ t('elemental3.snapshots.schedule') }}</b>
+            <template v-if="!editingSchedule">
+              <span data-testid="elemental3-snapshot-schedule-current">{{ schedule.enabled ? t(schedule.stated ? 'elemental3.snapshots.scheduleStated' : 'elemental3.snapshots.scheduleDefault', { cron: schedule.cron, retention: schedule.retention }) : t('elemental3.snapshots.scheduleOff') }}<template v-if="schedule.s3">
+                · S3 {{ schedule.s3 }}
+              </template></span>
+              <button
+                type="button"
+                class="btn btn-sm role-secondary ml-10"
+                :disabled="!can.scaleControlPlane || !!busy || upgradeRunning || !controlPlane"
+                :title="can.scaleControlPlane ? (upgradeRunning ? t('elemental3.pools.notDuringUpgrade') : '') : t('elemental3.snapshots.cannotSchedule')"
+                data-testid="elemental3-snapshot-schedule-edit"
+                @click="openSchedule"
+              >
+                {{ t('elemental3.snapshots.scheduleEdit') }}
+              </button>
+            </template>
+            <template v-else>
+              <label>{{ t('elemental3.snapshots.cron') }}
+                <input
+                  v-model="scheduleTo.cron"
+                  type="text"
+                  data-testid="elemental3-snapshot-cron"
+                >
+              </label>
+              <label>{{ t('elemental3.snapshots.retention') }}
+                <input
+                  v-model="scheduleTo.retention"
+                  type="number"
+                  min="1"
+                  data-testid="elemental3-snapshot-retention"
+                >
+              </label>
+              <label class="e3-check">
+                <input
+                  v-model="scheduleTo.s3"
+                  type="checkbox"
+                  data-testid="elemental3-snapshot-s3"
+                >
+                {{ t('elemental3.snapshots.s3.enable') }}
+              </label>
+              <div
+                v-if="scheduleTo.s3"
+                class="e3-s3"
+                data-testid="elemental3-snapshot-s3-form"
+              >
+                <label
+                  v-for="f in ['endpoint', 'bucket', 'folder', 'region', 'accessKey', 'secretKey']"
+                  :key="f"
+                  :class="{ 'text-error': s3Invalid.includes(f) }"
+                >{{ t(`elemental3.snapshots.s3.${ f }`) }}
+                  <input
+                    v-model="scheduleTo[f]"
+                    :type="f === 'secretKey' ? 'password' : 'text'"
+                    autocomplete="off"
+                    :data-testid="`elemental3-snapshot-s3-${ f }`"
+                  >
+                </label>
+                <label class="e3-check">
+                  <input
+                    v-model="scheduleTo.skipTlsVerify"
+                    type="checkbox"
+                    data-testid="elemental3-snapshot-s3-skip-verify"
+                  >
+                  {{ t('elemental3.snapshots.s3.skipTlsVerify') }}
+                </label>
+                <div class="text-muted e3-small">
+                  {{ t('elemental3.snapshots.s3.note') }}
+                </div>
+              </div>
+              <button
+                type="button"
+                class="btn btn-sm bg-error"
+                :disabled="!scheduleChanged || !!busy"
+                data-testid="elemental3-snapshot-schedule-apply"
+                @click="saveSchedule"
+              >
+                {{ t('elemental3.snapshots.scheduleApply') }}
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm role-secondary"
+                @click="editingSchedule = false"
+              >
+                {{ t('generic.cancel') }}
+              </button>
+              <div class="text-muted e3-small">
+                {{ t('elemental3.snapshots.scheduleNote') }}
+              </div>
+            </template>
+          </div>
+          <div class="e3-setting">
+            <button
+              type="button"
+              class="btn btn-sm role-secondary"
+              :disabled="!rancherReady || !!busy || upgradeRunning || (snapshotJob && snapshotJob.state === 'running')"
+              data-testid="elemental3-snapshot-now"
+              @click="snapshotNow"
+            >
+              {{ t('elemental3.snapshots.now') }}
+            </button>
+            <span
+              v-if="snapshotJob"
+              class="ml-10"
+              data-testid="elemental3-snapshot-job"
+              :data-state="snapshotJob.state"
+            >{{ t(`elemental3.snapshots.job.${ snapshotJob.state }`, { name: snapshotJob.name }) }}</span>
+          </div>
+          <Banner
+            v-if="!rancherReady"
+            color="info"
+            :label="t('elemental3.snapshots.notImported')"
+          />
+          <Banner
+            v-else-if="snapshotsError"
+            color="warning"
+            data-testid="elemental3-snapshots-error"
+            :label="snapshotsError"
+          />
+          <table
+            v-else
+            class="e3-table"
+            data-testid="elemental3-snapshots"
+          >
+            <thead>
+              <tr>
+                <th>{{ t('elemental3.snapshots.name') }}</th>
+                <th>{{ t('elemental3.snapshots.node') }}</th>
+                <th>{{ t('elemental3.snapshots.created') }}</th>
+                <th>{{ t('elemental3.snapshots.size') }}</th>
+                <th>{{ t('elemental3.snapshots.location') }}</th>
+                <th>{{ t('elemental3.snapshots.state') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="sn in snapshotList"
+                :key="`${ sn.node }/${ sn.name }/${ sn.location }`"
+                data-testid="elemental3-snapshot"
+              >
+                <td>{{ sn.name }}</td>
+                <td>{{ sn.node }}</td>
+                <td>{{ short(sn.created) }}</td>
+                <td>{{ sn.sizeText }}</td>
+                <td>{{ sn.location }}</td>
+                <td>{{ sn.error || (sn.ready ? t('elemental3.snapshots.ready') : t('elemental3.snapshots.notReady')) }}</td>
+              </tr>
+              <tr v-if="!snapshotList.length">
+                <td colspan="6">
+                  {{ t('elemental3.snapshots.none') }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="text-muted e3-small">
+            {{ t('elemental3.snapshots.note') }}
+          </p>
         </Tab>
 
         <Tab
@@ -1699,10 +2444,18 @@ export default {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
+    gap: 20px;
     margin-bottom: 15px;
+
+    > div:first-child {
+      flex: 1 1 auto;
+    }
   }
   .e3-actions {
     display: flex;
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 10px;
     align-items: center;
   }
@@ -1779,6 +2532,49 @@ export default {
   }
   .e3-small {
     font-size: 12px;
+  }
+  .e3-pool-settings {
+    margin: 10px 0 20px 0;
+  }
+  .e3-setting {
+    margin: 8px 0;
+
+    label {
+      margin-right: 10px;
+    }
+    input {
+      width: 110px;
+      display: inline-block;
+      margin: 0 6px;
+    }
+    input.e3-labels-input {
+      width: 420px;
+      max-width: 100%;
+    }
+    select {
+      display: inline-block;
+      width: auto;
+      margin: 0 6px;
+    }
+  }
+  .e3-s3 {
+    margin: 8px 0;
+
+    label {
+      display: inline-block;
+    }
+    input[type=text], input[type=password] {
+      width: 170px;
+    }
+  }
+  .e3-check input {
+    width: auto;
+    margin: 0 4px 0 0;
+  }
+  .e3-panel select {
+    display: inline-block;
+    width: auto;
+    margin: 0 6px;
   }
   .e3-resize {
     margin-top: 6px;

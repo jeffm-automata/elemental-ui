@@ -161,6 +161,95 @@ elemental3:
     cannotResize: 'Your account may not create machine templates or change the pool.'
     notDuringUpgrade: 'Not while an upgrade is running.'
     resizeFailed: 'Changing the machine size of {name} failed: {error}'
+  autoReplace:
+    title: 'Automatic replacement:'
+    on: 'on. A machine whose node is not ready for {minutes, plural, =1 {1 minute} other {# minutes}} is deleted and replaced.'
+    status: '{healthy} of {expected} machines healthy.'
+    paused: 'Not replacing right now: the health check reports that remediation is not allowed.'
+    off: 'off. A failed machine stays until you replace it.'
+    minutes: Minutes not ready
+    turnOn: Turn on
+    turnOff: Turn off
+    cannot: 'Your account may not create or delete machine health checks.'
+    unreadable: 'not known: your account may not list machine health checks.'
+    failed: 'Changing the automatic replacement of {name} failed: {error}'
+    wizard: Replace failed worker machines automatically
+    wizardTooltip: 'Writes a MachineHealthCheck for the worker pool: a machine whose node is not ready for 5 minutes is deleted and replaced by Cluster API. Can be changed on the cluster page.'
+  labels:
+    title: 'Node labels:'
+    none: none
+    unreadable: 'not known: the bootstrap template of the pool cannot be read.'
+    edit: Edit labels
+    apply: Replace machines with these labels
+    placeholder: 'key=value, key=value'
+    note: 'Labels are part of the configuration a machine boots with. Cluster API replaces the machines of this pool one by one: a new machine first, then the old one is drained and deleted with its disk. The new nodes carry the labels.'
+    cannot: 'Your account may not create bootstrap templates or change the pool.'
+    failed: 'Changing the node labels of {name} failed: {error}'
+    invalid:
+      syntax: '"{entry}" is not key=value.'
+      key: '"{entry}": the key is not a valid label name.'
+      value: '"{entry}": the value is not a valid label value (at most 63 letters, digits, "-", "_" or ".", starting and ending with a letter or digit).'
+      reserved: '"{entry}": keys under kubernetes.io and k8s.io cannot be set here; the kubelet refuses most of them and the machine would never become a node.'
+  certificates:
+    rotate: Rotate certificates
+    apply: Rotate
+    scope: Certificates of
+    scopes:
+      all: all nodes
+      controlPlane: control plane nodes
+      workers: worker nodes
+    note: 'Every node gets its certificates when it joins the cluster. Rotation replaces the machines one at a time: a new machine first, then the old one is drained and deleted with its disk. The certificate authorities of the cluster stay. With one control plane machine the Kubernetes API is briefly unavailable while it is replaced.'
+    progress: 'Certificate rotation, {part}, requested {requested}: {replaced} of {wanted} machines replaced, {old} still to go.'
+    done: 'Certificate rotation, {part}, requested {requested}: done, {replaced} of {wanted} machines replaced.'
+    cannot: 'Your account may not change the control plane and the worker pool.'
+    notReady: 'Only on a cluster that is ready.'
+    templatesBehind: 'Not offered: this cluster was upgraded in place, and its machine templates still name the node image it was created from. Replaced machines would start on the older release.'
+    failed: 'Requesting the certificate rotation failed: {error}'
+  access:
+    kubeconfig: Download kubeconfig
+    members: Members
+    projects: Projects
+    kubeconfigFailed: 'Downloading the kubeconfig failed: {error}'
+  snapshots:
+    title: Snapshots
+    schedule: 'Schedule:'
+    scheduleDefault: '{cron} (cron, node time), {retention} kept per node. RKE2 defaults; nothing is configured.'
+    scheduleStated: '{cron} (cron, node time), {retention} kept per node.'
+    scheduleOff: 'automatic snapshots are switched off.'
+    scheduleEdit: Change schedule
+    scheduleApply: Replace control plane machines with this schedule
+    scheduleNote: 'The schedule is part of the configuration a control plane machine boots with. The RKE2 provider replaces the control plane machines one by one to apply it.'
+    scheduleFailed: 'Changing the snapshot schedule failed: {error}'
+    cannotSchedule: 'Your account may not change the control plane.'
+    cron: Cron
+    retention: Snapshots kept
+    s3:
+      enable: Also store snapshots in an S3 bucket
+      endpoint: Endpoint (host or host:port)
+      bucket: Bucket
+      folder: Folder (optional)
+      region: Region (optional)
+      accessKey: Access key
+      secretKey: Secret key
+      skipTlsVerify: Do not verify the certificate of the endpoint
+      note: 'The keys are written to a Secret in the namespace of the cluster on the management cluster, which the RKE2 provider reads; this page cannot show them again. Changing the target needs both keys again.'
+    now: Snapshot now
+    nowFailed: 'Starting the snapshot failed: {error}'
+    job:
+      running: 'Snapshot job {name} is running.'
+      done: 'Snapshot job {name} finished.'
+      failed: 'Snapshot job {name} failed. Its pod log in kube-system says why.'
+    name: Snapshot
+    node: Node
+    created: Taken
+    size: Size
+    location: Location
+    state: State
+    ready: Ready to use
+    notReady: Not ready
+    none: No snapshots yet.
+    notImported: 'Snapshots are read from the cluster itself, through Rancher. They appear when Rancher has imported the cluster.'
+    note: 'Snapshots RKE2 has recorded in the cluster (etcdsnapshotfiles.k3s.cattle.io). Snapshot now runs one Job in kube-system that calls rke2 etcd-snapshot save on a control plane node. Restoring a snapshot is not offered here.'
   machines:
     title: Machines
     name: Machine

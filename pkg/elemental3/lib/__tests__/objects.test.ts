@@ -104,7 +104,7 @@ describe('buildObjects', () => {
   const byKey = (key: string) => objects.find((o) => o.key === key)?.object;
   const n = names('demo');
 
-  it('writes the eight objects of the proven set, the Cluster first', () => {
+  it('writes the eight objects of the proven set and the health check of the worker pool, the Cluster first', () => {
     expect(objects.map((o) => `${ o.object.kind }/${ o.object.metadata.name }`)).toStrictEqual([
       'Cluster/demo',
       'Secret/demo-harvester-identity',
@@ -114,6 +114,7 @@ describe('buildObjects', () => {
       'RKE2ConfigTemplate/demo-worker',
       'HarvesterMachineTemplate/demo-worker',
       'MachineDeployment/demo-md-0',
+      'MachineHealthCheck/demo-md-0-auto-replace',
     ]);
     objects.forEach((o) => {
       expect(o.object.metadata.namespace).toBe('fleet-default');
@@ -381,5 +382,51 @@ describe('changing the machine size of a worker pool', () => {
 
   it('points the pool at the new template with a patch of the name only', () => {
     expect(poolTemplatePatch('c1-md-0-2c12g-k3x9')).toEqual({ spec: { template: { spec: { infrastructureRef: { name: 'c1-md-0-2c12g-k3x9' } } } } });
+  });
+});
+
+describe('automatic replacement in the form', () => {
+  const v = values();
+
+  it('is on by default: a health check for the worker pool, last in the list, 5 minutes, no limit', () => {
+    expect(defaultValues().autoReplace).toBe(true);
+    const objects = buildObjects(v, { kubeconfig: 'K' });
+    const last = objects[objects.length - 1];
+
+    expect(last.key).toBe('workerHealthCheck');
+    expect(last.object).toStrictEqual({
+      apiVersion: 'cluster.x-k8s.io/v1beta2',
+      kind:       'MachineHealthCheck',
+      metadata:   {
+        name: 'demo-md-0-auto-replace', namespace: 'fleet-default', labels: { 'cluster.x-k8s.io/cluster-name': 'demo', 'elemental.suse.com/created-by': 'elemental3-ui' }
+      },
+      spec: {
+        clusterName: 'demo',
+        selector:    { matchLabels: { 'cluster.x-k8s.io/deployment-name': 'demo-md-0' } },
+        checks:      {
+          nodeStartupTimeoutSeconds: 1800,
+          unhealthyNodeConditions:   [
+            {
+              type: 'Ready', status: 'False', timeoutSeconds: 300
+            },
+            {
+              type: 'Ready', status: 'Unknown', timeoutSeconds: 300
+            },
+          ],
+        },
+      },
+    });
+    // It selects exactly the machines the MachineDeployment makes, and no control plane machine
+    const md = objects.find((o) => o.key === 'workers')?.object;
+
+    expect(md.spec.template.metadata.labels).toMatchObject(last.object.spec.selector.matchLabels);
+    expect(last.object.spec.remediation).toBeUndefined();
+  });
+
+  it('is left out when switched off, and nothing else changes', () => {
+    const on = buildObjects(v, { kubeconfig: 'K' });
+    const off = buildObjects({ ...v, autoReplace: false }, { kubeconfig: 'K' });
+
+    expect(off).toStrictEqual(on.slice(0, -1));
   });
 });

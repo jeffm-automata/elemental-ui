@@ -747,6 +747,20 @@ export default {
             />
           </div>
         </div>
+        <div
+          v-if="pool === 'workers'"
+          class="row mb-20"
+        >
+          <div class="col span-6">
+            <Checkbox
+              v-model:value="form.autoReplace"
+              :mode="mode"
+              :label="t('elemental3.autoReplace.wizard')"
+              :tooltip="t('elemental3.autoReplace.wizardTooltip')"
+              data-testid="elemental3-auto-replace"
+            />
+          </div>
+        </div>
       </div>
     </div>
   </CruResource>
