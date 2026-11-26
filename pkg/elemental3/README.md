@@ -102,6 +102,9 @@ in `lib/manage.ts`. x86-64 only, tried on Harvester VMs only.
 | **Snapshots** tab: schedule, retention, S3 target | Change schedule | `serverConfig.etcd.backupConfig` of the RKE2ControlPlane (`scheduleCron`, `retention`, `s3`), and for S3 one Secret with the two keys, owned by the Cluster. The RKE2 provider replaces the control plane machines to apply it |
 | **Snapshots** tab: Snapshot now | Button | One `Job` in `kube-system` of the workload cluster: a privileged pod on a control plane node that enters the host's namespaces and runs the node's own `rke2 etcd-snapshot save --name on-demand`. This is the one place where the page starts work on a node itself: Cluster API and the RKE2 provider have no object for a snapshot on request. The Job removes itself an hour after it finished |
 
+Snapshots that exist only as files on control plane nodes are deleted when those machines are replaced (a schedule
+change, a certificate rotation): seen in the lab, and the two forms say how many would be lost (since 0.6.2).
+
 Not built: restoring a snapshot, certificate expiry dates read from the certificates, rotation in place, labels and size of the control plane
 pool, chart values.
 

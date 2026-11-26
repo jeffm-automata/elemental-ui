@@ -220,6 +220,7 @@ elemental3:
     scheduleEdit: Change schedule
     scheduleApply: Replace control plane machines with this schedule
     scheduleNote: 'The schedule is part of the configuration a control plane machine boots with. The RKE2 provider replaces the control plane machines one by one to apply it.'
+    lostWithMachines: '{count, plural, =1 {1 snapshot is} other {# snapshots are}} stored only on control plane nodes and will be deleted with the machines. Snapshots in an S3 bucket stay.'
     scheduleFailed: 'Changing the snapshot schedule failed: {error}'
     cannotSchedule: 'Your account may not change the control plane.'
     cron: Cron

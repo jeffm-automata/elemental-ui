@@ -364,6 +364,14 @@ export default {
       return snapshotSchedule(this.controlPlane);
     },
 
+    /**
+     * Snapshots that exist only as files on control plane nodes. Replacing the control plane machines
+     * (a schedule change, a certificate rotation) deletes them with the machines' disks.
+     */
+    snapshotsOnNodes() {
+      return this.snapshotList.filter((sn) => !sn.s3).length;
+    },
+
     /** The S3 target as typed; null when the box is not ticked */
     typedS3() {
       const f = this.scheduleTo;
@@ -1469,6 +1477,12 @@ export default {
       >
         <h3>{{ t('elemental3.certificates.rotate') }}</h3>
         <p>{{ t('elemental3.certificates.note') }}</p>
+        <Banner
+          v-if="snapshotsOnNodes && rotateScope !== 'workers'"
+          color="warning"
+          data-testid="elemental3-rotate-snapshots-warning"
+          :label="t('elemental3.snapshots.lostWithMachines', { count: snapshotsOnNodes })"
+        />
         <p
           v-if="certificateAge"
           data-testid="elemental3-rotate-age"
@@ -2296,6 +2310,12 @@ export default {
               <div class="text-muted e3-small">
                 {{ t('elemental3.snapshots.scheduleNote') }}
               </div>
+              <Banner
+                v-if="snapshotsOnNodes"
+                color="warning"
+                data-testid="elemental3-schedule-snapshots-warning"
+                :label="t('elemental3.snapshots.lostWithMachines', { count: snapshotsOnNodes })"
+              />
             </template>
           </div>
           <div class="e3-setting">

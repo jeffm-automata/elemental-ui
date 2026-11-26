@@ -1,7 +1,7 @@
 {
   "name": "elemental3",
   "description": "Elemental 3 cluster provisioning: create, progress, machine pools and release upgrade for clusters on Harvester (Cluster API)",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "private": false,
   "rancher": {
     "annotations": {
