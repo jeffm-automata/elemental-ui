@@ -97,6 +97,7 @@ export default {
       // etcd snapshots of the workload cluster; null: not read yet or not readable
       snapshots:       null,
       snapshotsError:  '',
+      snapshotsRead:   0,
       snapshotJobs:    [],
       editingSchedule: false,
       scheduleTo:      {
@@ -723,7 +724,10 @@ export default {
           this.releaseError = errorText(e);
         }
       }
-      await this.loadSnapshots();
+      // Snapshots change rarely: read once a minute, and with every refresh while a snapshot job of this page runs
+      if (Date.now() - this.snapshotsRead > 60000 || this.snapshotJob?.state === 'running') {
+        await this.loadSnapshots();
+      }
       // While not ready this is read with every refresh; once ready, once a minute
       if (!this.upgradeRunning && (!this.readiness || this.readiness.state !== 'ready' || Date.now() - this.readinessRead > 60000)) {
         await this.loadReadiness();
@@ -760,6 +764,7 @@ export default {
 
     /** Snapshots RKE2 knows, and the snapshot Jobs this page started, both in the workload cluster. */
     async loadSnapshots() {
+      this.snapshotsRead = Date.now();
       try {
         this.snapshots = (await this.workload('get', SNAPSHOT_FILES_PATH))?.items || [];
         this.snapshotsError = '';
